@@ -7,19 +7,25 @@ import { onAuthStateChanged, type User } from 'firebase/auth';
 import { doc, onSnapshot } from 'firebase/firestore';
 import { useEffect, useState } from 'react';
 import AdminConsole, { type AdminSectionTab } from './components/AdminConsole';
-import DeviceAuthGate from './components/DeviceAuthGate';
 import ErrorBoundary from './components/ErrorBoundary';
 import ParticipantCheckIn from './components/ParticipantCheckIn';
 import ParticipantFeedback from './components/ParticipantFeedback';
-import { auth, db, handleFirestoreError } from './firebase';
+import { auth, db, reportFirestoreError } from './firebase';
 import { OperationType, type OrganizationBranding } from './types';
+import { sanitizeEventIdParam } from './utils/qrUrl';
 
 type ViewMode = 'checkin' | 'feedback' | 'admin';
 
 function readInitialEventId(): string | null {
   const params = new URLSearchParams(window.location.search);
-  const raw = params.get('event');
-  return raw ? raw.trim() : null;
+  const queryEvent = sanitizeEventIdParam(params.get('event'));
+  if (queryEvent) return queryEvent;
+  if (window.location.hash.startsWith('#event=')) {
+    return sanitizeEventIdParam(
+      decodeURIComponent(window.location.hash.slice('#event='.length))
+    );
+  }
+  return null;
 }
 
 function readAdminSectionFromLocation(): AdminSectionTab {
@@ -40,7 +46,12 @@ function isAdminLocation(): boolean {
 
 function isFeedbackQueryLocation(): boolean {
   const params = new URLSearchParams(window.location.search);
-  return params.get('view') === 'feedback' || window.location.hash === '#feedback';
+  const path = window.location.pathname.replace(/\/+$/, '');
+  return (
+    params.get('view') === 'feedback' ||
+    path === '/feedback' ||
+    window.location.hash === '#feedback'
+  );
 }
 
 function readInitialView(): ViewMode {
@@ -84,17 +95,22 @@ export default function App() {
           const data = snap.data() as {
             organizationName?: string;
             logoDataUrl?: string;
+            publicAppUrl?: string;
           };
           setBranding({
             organizationName: (data.organizationName || '').trim(),
             logoDataUrl: data.logoDataUrl || '',
+            publicAppUrl:
+              typeof data.publicAppUrl === 'string'
+                ? data.publicAppUrl.trim()
+                : '',
           });
         } else {
           setBranding(null);
         }
       },
       (error) => {
-        handleFirestoreError(error, OperationType.GET, 'branding/default');
+        reportFirestoreError(error, OperationType.GET, 'branding/default');
       }
     );
     return () => unsubscribe();
@@ -175,13 +191,7 @@ export default function App() {
 
   return (
     <ErrorBoundary>
-      <DeviceAuthGate
-        branding={branding}
-        isDirectQrLink={isQrParticipantView}
-        user={user}
-        authReady={authReady}
-      >
-        <div className="min-h-screen flex flex-col bg-slate-50 text-slate-900">
+      <div className="min-h-screen flex flex-col bg-slate-50 text-slate-900">
         {/* Top Bar */}
         <header className="sticky top-0 z-30 bg-white/95 backdrop-blur-md border-b border-slate-200">
           <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between gap-4">
@@ -194,7 +204,7 @@ export default function App() {
                 }
                 navigateToView(view === 'feedback' && isQrParticipantView ? 'feedback' : 'checkin');
               }}
-              className="flex items-center gap-3 min-w-0 shrink-0"
+              className="flex items-center gap-2.5 sm:gap-3 min-w-0 flex-1 md:flex-initial"
             >
               {logoUrl && (
                 <img
@@ -206,7 +216,7 @@ export default function App() {
               <div className="min-w-0 flex flex-col leading-tight">
                 {orgName ? (
                   <>
-                    <span className="font-display text-sm sm:text-base font-extrabold tracking-tight text-slate-900 truncate max-w-[180px] sm:max-w-[260px]">
+                    <span className="font-display text-sm sm:text-base font-extrabold tracking-tight text-slate-900 truncate max-w-full sm:max-w-[280px]">
                       {orgName}
                     </span>
                     <span className="text-[11px] font-bold tracking-wider text-blue-700 uppercase">
@@ -222,11 +232,11 @@ export default function App() {
             </a>
 
             {isQrParticipantView ? (
-              <div className="flex items-center gap-2 shrink-0">
+              <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
                 <button
                   type="button"
                   onClick={() => handleSelectEventId(requestedEventId)}
-                  className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap ${
+                  className={`px-2.5 sm:px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap ${
                     view === 'checkin'
                       ? 'bg-slate-900 text-white'
                       : 'text-slate-600 hover:bg-slate-100'
@@ -237,13 +247,14 @@ export default function App() {
                 <button
                   type="button"
                   onClick={() => handleOpenFeedbackEvent(requestedEventId)}
-                  className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap ${
+                  className={`px-2.5 sm:px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap ${
                     view === 'feedback'
                       ? 'bg-blue-700 text-white'
                       : 'text-slate-600 hover:bg-slate-100'
                   }`}
                 >
-                  Feedback &amp; Evaluation
+                  <span className="sm:hidden">Feedback</span>
+                  <span className="hidden sm:inline">Feedback &amp; Evaluation</span>
                 </button>
               </div>
             ) : (
@@ -420,12 +431,11 @@ export default function App() {
               {orgName ? `${orgName} · ` : ''}PRESENZA · Workshops, Seminars &amp; Professional Development
             </span>
             <span>
-              QR attendance check-in &amp; evaluation (participant login optional)
+              Instant QR attendance check-in &amp; evaluation · No participant login required
             </span>
           </div>
         </footer>
         </div>
-      </DeviceAuthGate>
     </ErrorBoundary>
   );
 }

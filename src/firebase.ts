@@ -130,13 +130,31 @@ export function formatFirebaseAuthError(error: unknown): AuthErrorDetails {
   }
 }
 
-export function handleFirestoreError(
+export function extractFirebaseErrorDetails(error: unknown): {
+  code: string;
+  message: string;
+} {
+  const code =
+    typeof error === 'object' && error !== null && 'code' in error
+      ? String((error as { code?: unknown }).code || '')
+      : '';
+  const message =
+    error instanceof Error
+      ? error.message
+      : typeof error === 'string'
+      ? error
+      : 'Unknown Firestore error';
+  return { code, message };
+}
+
+export function reportFirestoreError(
   error: unknown,
   operationType: OperationType,
   path: string | null
-): never {
+): FirestoreErrorInfo & { code: string } {
+  const { code, message } = extractFirebaseErrorDetails(error);
   const errInfo: FirestoreErrorInfo = {
-    error: error instanceof Error ? error.message : String(error),
+    error: message,
     authInfo: {
       userId: auth.currentUser?.uid,
       email: auth.currentUser?.email,
@@ -152,8 +170,17 @@ export function handleFirestoreError(
     operationType,
     path,
   };
-  console.error('Firestore Error: ', JSON.stringify(errInfo));
-  throw new Error(JSON.stringify(errInfo));
+  console.error('Firestore Error: ', JSON.stringify({ code, ...errInfo }));
+  return { code, ...errInfo };
+}
+
+export function handleFirestoreError(
+  error: unknown,
+  operationType: OperationType,
+  path: string | null
+): never {
+  const info = reportFirestoreError(error, operationType, path);
+  throw new Error(JSON.stringify(info));
 }
 
 async function testConnection() {

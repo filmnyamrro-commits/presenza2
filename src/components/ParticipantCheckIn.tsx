@@ -1,20 +1,19 @@
 import {
+  AlertCircle,
   Camera,
   CheckCircle2,
   Clock,
   FlipHorizontal2,
   Loader2,
-  LogOut,
-  Mail,
   MapPin,
   MessageSquare,
   RefreshCw,
   ShieldCheck,
+  Upload,
   UserCheck,
   Volume2,
-  AlertCircle,
 } from 'lucide-react';
-import { signInWithPopup, signOut, type User } from 'firebase/auth';
+import { type User } from 'firebase/auth';
 import {
   collection,
   doc,
@@ -25,22 +24,21 @@ import {
   setDoc,
   where,
 } from 'firebase/firestore';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  auth,
-  type AuthErrorDetails,
   db,
-  formatFirebaseAuthError,
-  googleProvider,
-  handleFirestoreError,
-  normalizeAdminEmail,
+  extractFirebaseErrorDetails,
+  reportFirestoreError,
 } from '../firebase';
 import {
   type CheckInReceipt,
+  type DiagnosticErrorDetails,
   type EventRecord,
   OperationType,
   type VoiceAnnouncementSettings,
 } from '../types';
+import { isValidEventIdParam } from '../utils/qrUrl';
+import DiagnosticErrorPanel from './DiagnosticErrorPanel';
 import {
   buildCutoffDate,
   evaluateAttendanceStatus,
@@ -66,9 +64,49 @@ interface ParticipantCheckInProps {
   onGoToAdmin?: () => void;
 }
 
+const CHECKIN_DEDUPE_STORAGE_KEY = 'presenza_checkin_receipts_v1';
+
+function buildParticipantDedupeKey(
+  eventId: string,
+  fullName: string,
+  classDepartment: string
+): string {
+  const normName = fullName.trim().toLowerCase().replace(/\s+/g, ' ');
+  const normDept = classDepartment.trim().toLowerCase().replace(/\s+/g, ' ');
+  return `${eventId}::${normName}::${normDept}`;
+}
+
+function readSavedReceiptByKey(dedupeKey: string): CheckInReceipt | null {
+  try {
+    const raw = window.localStorage.getItem(CHECKIN_DEDUPE_STORAGE_KEY);
+    if (!raw) return null;
+    const map = JSON.parse(raw) as Record<string, CheckInReceipt>;
+    return map[dedupeKey] ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function saveReceiptForDedupe(dedupeKey: string, receipt: CheckInReceipt): void {
+  try {
+    const raw = window.localStorage.getItem(CHECKIN_DEDUPE_STORAGE_KEY);
+    const map: Record<string, CheckInReceipt> = raw ? JSON.parse(raw) : {};
+    map[dedupeKey] = receipt;
+    // Keep at most 20 recent receipts on device to stay well under storage quota
+    const entries = Object.entries(map);
+    if (entries.length > 20) {
+      const trimmed = Object.fromEntries(entries.slice(entries.length - 20));
+      window.localStorage.setItem(CHECKIN_DEDUPE_STORAGE_KEY, JSON.stringify(trimmed));
+    } else {
+      window.localStorage.setItem(CHECKIN_DEDUPE_STORAGE_KEY, JSON.stringify(map));
+    }
+  } catch {
+    // Ignore storage quota restrictions cleanly
+  }
+}
+
 export default function ParticipantCheckIn({
   requestedEventId,
-  user = null,
   onSelectEventId,
   onGoToFeedback,
   onGoToAdmin,
@@ -77,6 +115,8 @@ export default function ParticipantCheckIn({
   const [selectedEvent, setSelectedEvent] = useState<EventRecord | null>(null);
   const [loadingEvents, setLoadingEvents] = useState(true);
   const [eventError, setEventError] = useState<string | null>(null);
+  const [eventDiagnostic, setEventDiagnostic] =
+    useState<DiagnosticErrorDetails | null>(null);
 
   const [now, setNow] = useState<Date>(() => new Date());
 
@@ -87,13 +127,10 @@ export default function ParticipantCheckIn({
   const [photoConsent, setPhotoConsent] = useState(false);
   const [lateExcuse, setLateExcuse] = useState('');
 
-  // Optional participant Google sign-in state (when event requires email login)
-  const [signingInParticipant, setSigningInParticipant] = useState(false);
-  const [participantAuthError, setParticipantAuthError] =
-    useState<AuthErrorDetails | null>(null);
-
   // Camera state
   const [cameraOpen, setCameraOpen] = useState(false);
+  const [cameraReady, setCameraReady] = useState(false);
+  const [activeStream, setActiveStream] = useState<MediaStream | null>(null);
   const [cameraFacing, setCameraFacing] = useState<'user' | 'environment'>('user');
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [processingPhoto, setProcessingPhoto] = useState(false);
@@ -101,6 +138,9 @@ export default function ParticipantCheckIn({
   // Submit & receipt state
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
+  const [formDiagnostic, setFormDiagnostic] =
+    useState<DiagnosticErrorDetails | null>(null);
+  const [duplicateReceipt, setDuplicateReceipt] = useState<CheckInReceipt | null>(null);
   const [receipt, setReceipt] = useState<CheckInReceipt | null>(null);
 
   // Voice announcement settings
@@ -111,6 +151,8 @@ export default function ParticipantCheckIn({
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const nativeCameraInputRef = useRef<HTMLInputElement | null>(null);
+  const fileUploadInputRef = useRef<HTMLInputElement | null>(null);
+  const submitLockRef = useRef(false);
 
   // Load saved Voice Announcement Settings
   useEffect(() => {
@@ -170,7 +212,19 @@ export default function ParticipantCheckIn({
       },
       (error) => {
         setLoadingEvents(false);
-        handleFirestoreError(error, OperationType.LIST, 'events');
+        const info = reportFirestoreError(error, OperationType.LIST, 'events');
+        setEventError(
+          `Unable to load active sessions from the database (${info.code || 'firestore-error'}).`
+        );
+        setEventDiagnostic({
+          title: 'Active Sessions Listener Failed',
+          message: info.error,
+          failingUrl: window.location.href,
+          firebaseCode: info.code || undefined,
+          firebaseMessage: info.error,
+          consoleError: `Firestore LIST events failed: ${info.error}`,
+          component: 'ParticipantCheckIn.subscribeActiveEvents',
+        });
       }
     );
 
@@ -183,38 +237,82 @@ export default function ParticipantCheckIn({
 
     async function resolveEvent() {
       setEventError(null);
+      setEventDiagnostic(null);
       if (requestedEventId) {
+        if (!isValidEventIdParam(requestedEventId)) {
+          setSelectedEvent(null);
+          setEventError(
+            `Invalid event identifier in QR link ("${requestedEventId}").`
+          );
+          setEventDiagnostic({
+            title: 'Invalid QR Event Parameter',
+            message: 'The event query parameter contains unsupported characters or length.',
+            failingUrl: window.location.href,
+            consoleError: `Invalid event ID format: "${requestedEventId}"`,
+            component: 'ParticipantCheckIn.resolveEvent',
+          });
+          return;
+        }
+
         const match = activeEvents.find((ev) => ev.id === requestedEventId);
         if (match) {
           setSelectedEvent(match);
           return;
         }
-        // Try direct get if not yet in activeEvents (e.g. closed or invalid)
+
         try {
           const snap = await getDoc(doc(db, 'events', requestedEventId));
           if (cancelled) return;
           if (!snap.exists()) {
             setSelectedEvent(null);
             setEventError(
-              'This QR code session was not found or has ended. Select an active session below if available.'
+              `This QR code session (${requestedEventId}) was not found or has been removed.`
             );
+            setEventDiagnostic({
+              title: 'Event Not Found',
+              message: `No event document exists at events/${requestedEventId}.`,
+              failingUrl: window.location.href,
+              firebaseCode: 'not-found',
+              firebaseMessage: `Document events/${requestedEventId} does not exist.`,
+              component: 'ParticipantCheckIn.resolveEvent',
+            });
           } else {
             const data = snap.data() as Omit<EventRecord, 'id'>;
             if (data.status !== 'active') {
               setSelectedEvent(null);
               setEventError(
-                'Check-in for this session has been closed by the administrator.'
+                `Check-in for "${data.title}" (${data.eventDate}) is currently closed by the organizer.`
               );
+              setEventDiagnostic({
+                title: 'Session Closed',
+                message: `Event "${data.title}" exists, but status is "${data.status}".`,
+                failingUrl: window.location.href,
+                component: 'ParticipantCheckIn.resolveEvent',
+              });
             } else {
               setSelectedEvent({ id: snap.id, ...data });
             }
           }
-        } catch {
+        } catch (err) {
           if (!cancelled) {
+            const info = reportFirestoreError(
+              err,
+              OperationType.GET,
+              `events/${requestedEventId}`
+            );
             setSelectedEvent(null);
             setEventError(
-              'This session is no longer accepting check-ins or could not be loaded.'
+              `Unable to load QR session "${requestedEventId}" (${info.code || 'firestore-error'}).`
             );
+            setEventDiagnostic({
+              title: 'Session Lookup Failed',
+              message: info.error,
+              failingUrl: window.location.href,
+              firebaseCode: info.code || undefined,
+              firebaseMessage: info.error,
+              consoleError: `Firestore GET events/${requestedEventId}: ${info.error}`,
+              component: 'ParticipantCheckIn.resolveEvent',
+            });
           }
         }
       } else {
@@ -237,6 +335,8 @@ export default function ParticipantCheckIn({
       streamRef.current.getTracks().forEach((track) => track.stop());
       streamRef.current = null;
     }
+    setActiveStream(null);
+    setCameraReady(false);
     if (videoRef.current) {
       videoRef.current.srcObject = null;
     }
@@ -244,16 +344,75 @@ export default function ParticipantCheckIn({
 
   useEffect(() => {
     return () => {
-      stopCameraStream();
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach((track) => track.stop());
+        streamRef.current = null;
+      }
     };
   }, []);
 
+  // Attach MediaStream reliably once <video> is mounted (prevents iOS/Safari & fast-grant blank video)
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!cameraOpen || !activeStream || !video) return;
+
+    let cancelled = false;
+    video.setAttribute('playsinline', 'true');
+    video.setAttribute('webkit-playsinline', 'true');
+    video.muted = true;
+    video.autoplay = true;
+    video.srcObject = activeStream;
+
+    const markReady = () => {
+      if (cancelled) return;
+      if (video.videoWidth > 0 || video.readyState >= 2) {
+        setCameraReady(true);
+      }
+    };
+
+    const handleLoadedMetadata = () => {
+      void video.play().catch(() => {
+        // Ignore autoplay promise rejection if user gesture already active
+      });
+      markReady();
+    };
+
+    video.addEventListener('loadedmetadata', handleLoadedMetadata);
+    video.addEventListener('canplay', markReady);
+    video.addEventListener('playing', markReady);
+
+    if (video.readyState >= 2) {
+      handleLoadedMetadata();
+    } else {
+      void video.play().catch(() => {
+        // Will play once metadata arrives
+      });
+    }
+
+    return () => {
+      cancelled = true;
+      video.removeEventListener('loadedmetadata', handleLoadedMetadata);
+      video.removeEventListener('canplay', markReady);
+      video.removeEventListener('playing', markReady);
+    };
+  }, [cameraOpen, activeStream]);
+
   const startCamera = async (facing: 'user' | 'environment') => {
     setCameraError(null);
+    setCameraReady(false);
     stopCameraStream();
+
+    if (typeof window !== 'undefined' && window.isSecureContext === false) {
+      setCameraError(
+        'Live browser camera requires a secure HTTPS connection. Please open the HTTPS attendance link, or use "Use Phone Camera" / "Upload Photo" below.'
+      );
+      setCameraOpen(false);
+      return;
+    }
+
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
       setCameraError(
-        'Live camera preview is unavailable in this browser. Use "Use native phone camera app" below.'
+        'Live camera preview is not supported in this browser. Please tap "Use Phone Camera" or "Upload Photo" below.'
       );
       setCameraOpen(false);
       return;
@@ -261,27 +420,58 @@ export default function ParticipantCheckIn({
 
     try {
       setCameraOpen(true);
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: {
-          facingMode: { ideal: facing },
-          width: { ideal: 960 },
-          height: { ideal: 720 },
-        },
-        audio: false,
-      });
-      streamRef.current = stream;
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        await videoRef.current.play();
+      let stream: MediaStream;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            facingMode: { ideal: facing },
+            width: { ideal: 1280 },
+            height: { ideal: 720 },
+          },
+          audio: false,
+        });
+      } catch (constraintErr) {
+        const errName =
+          constraintErr instanceof DOMException ? constraintErr.name : '';
+        if (
+          errName === 'OverconstrainedError' ||
+          errName === 'NotFoundError' ||
+          errName === 'TypeError'
+        ) {
+          stream = await navigator.mediaDevices.getUserMedia({
+            video: true,
+            audio: false,
+          });
+        } else {
+          throw constraintErr;
+        }
       }
+
+      streamRef.current = stream;
+      setActiveStream(stream);
     } catch (err) {
       setCameraOpen(false);
       stopCameraStream();
-      const message =
-        err instanceof Error ? err.message : 'Camera permission was denied.';
-      setCameraError(
-        `Unable to open live camera (${message}). Please allow camera access or use your phone's native camera button below.`
-      );
+      const errName = err instanceof DOMException ? err.name : '';
+      if (errName === 'NotAllowedError' || errName === 'PermissionDeniedError') {
+        setCameraError(
+          'Camera permission was denied. Allow camera access in your browser site settings (Safari: Aa / Settings → Camera → Allow; Chrome: Lock icon → Permissions → Camera), or tap "Upload Photo" below.'
+        );
+      } else if (errName === 'NotFoundError' || errName === 'DevicesNotFoundError') {
+        setCameraError(
+          'No camera was detected on this device. Please use "Upload Photo" below to select a photo.'
+        );
+      } else if (errName === 'NotReadableError' || errName === 'TrackStartError') {
+        setCameraError(
+          'Your camera is currently being used by another application. Close the other app and try again, or use "Upload Photo" below.'
+        );
+      } else {
+        const message =
+          err instanceof Error ? err.message : 'Camera access is unavailable.';
+        setCameraError(
+          `Unable to open live camera (${message}). Please tap "Use Phone Camera" or "Upload Photo" below.`
+        );
+      }
     }
   };
 
@@ -292,13 +482,14 @@ export default function ParticipantCheckIn({
   };
 
   const handleCaptureSnapshot = () => {
-    if (!videoRef.current) return;
+    const video = videoRef.current;
+    if (!video || video.readyState < 2 || video.videoWidth === 0) {
+      setCameraError('Camera is still warming up. Please wait a moment and tap Capture Photo again.');
+      return;
+    }
     try {
       setProcessingPhoto(true);
-      const dataUrl = captureVideoFrame(
-        videoRef.current,
-        cameraFacing === 'user'
-      );
+      const dataUrl = captureVideoFrame(video, cameraFacing === 'user');
       setPhotoDataUrl(dataUrl);
       setCameraOpen(false);
       stopCameraStream();
@@ -344,45 +535,14 @@ export default function ParticipantCheckIn({
   const liveDateStr = formatLocalDateYmd(now);
   const liveTimeStr = formatClockTime(now);
 
-  const requiresParticipantLogin = Boolean(selectedEvent?.requireParticipantLogin);
-  const participantVerifiedEmail =
-    user && user.email && user.emailVerified
-      ? normalizeAdminEmail(user.email)
-      : '';
-
-  useEffect(() => {
-    if (
-      requiresParticipantLogin &&
-      user?.displayName &&
-      !fullName.trim()
-    ) {
-      setFullName(user.displayName.trim().slice(0, 100));
-    }
-  }, [requiresParticipantLogin, user?.displayName, fullName]);
-
-  const handleParticipantGoogleSignIn = async () => {
-    setParticipantAuthError(null);
-    setSigningInParticipant(true);
-    try {
-      const cred = await signInWithPopup(auth, googleProvider);
-      if (cred.user?.displayName && !fullName.trim()) {
-        setFullName(cred.user.displayName.trim().slice(0, 100));
-      }
-    } catch (err: unknown) {
-      setParticipantAuthError(formatFirebaseAuthError(err));
-    } finally {
-      setSigningInParticipant(false);
-    }
-  };
-
-  const handleParticipantSignOut = async () => {
-    setParticipantAuthError(null);
-    try {
-      await signOut(auth);
-    } catch (err: unknown) {
-      setParticipantAuthError(formatFirebaseAuthError(err));
-    }
-  };
+  const departmentPresetOptions = useMemo(() => {
+    const raw = selectedEvent?.departmentPresets || '';
+    return raw
+      .split(',')
+      .map((item) => item.trim())
+      .filter((item) => item.length > 0)
+      .slice(0, 12);
+  }, [selectedEvent?.departmentPresets]);
 
   const customDepartmentLabel =
     selectedEvent?.departmentLabel?.trim() || 'Class / Department';
@@ -392,16 +552,13 @@ export default function ParticipantCheckIn({
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (submitLockRef.current || submitting) return;
     setFormError(null);
+    setFormDiagnostic(null);
+    setDuplicateReceipt(null);
 
     if (!selectedEvent) {
       setFormError('No active workshop or seminar session is selected.');
-      return;
-    }
-    if (requiresParticipantLogin && (!user || !participantVerifiedEmail)) {
-      setFormError(
-        'This session requires you to sign in with your Google email before submitting check-in.'
-      );
       return;
     }
 
@@ -417,7 +574,7 @@ export default function ParticipantCheckIn({
       return;
     }
     if (!photoDataUrl) {
-      setFormError('Please take a picture using your camera.');
+      setFormError('Please take or upload a verification photo.');
       return;
     }
     if (!photoConsent) {
@@ -425,7 +582,21 @@ export default function ParticipantCheckIn({
       return;
     }
 
-    setSubmitting(true);
+    // Check accidental duplicate submission on this device for the same event + person
+    const dedupeKey = buildParticipantDedupeKey(
+      selectedEvent.id,
+      cleanName,
+      cleanDept
+    );
+    const existingReceipt = readSavedReceiptByKey(dedupeKey);
+    if (existingReceipt) {
+      setDuplicateReceipt(existingReceipt);
+      setFormError(
+        `${cleanName} (${cleanDept}) is already checked in to this session on this device. Duplicate submission prevented.`
+      );
+      return;
+    }
+
     const submitMoment = new Date();
     const attendanceDate = formatLocalDateYmd(submitMoment);
     const checkInTime = formatClockTime(submitMoment);
@@ -436,112 +607,158 @@ export default function ParticipantCheckIn({
     const cleanExcuse = lateExcuse.trim().slice(0, 300);
 
     if (computedStatus === 'Late' && cleanExcuse.length < 3) {
-      setSubmitting(false);
       setFormError(
         'You are checking in after the cutoff time. Please type your excuse for being late before submitting.'
       );
       return;
     }
 
-    const attendanceId = generateSafeId('att');
-    const finalExcuse = computedStatus === 'Late' ? cleanExcuse : '';
-
-    const payload: Record<string, unknown> = {
-      eventId: selectedEvent.id,
-      eventName: selectedEvent.title,
-      fullName: cleanName.slice(0, 100),
-      classDepartment: cleanDept.slice(0, 100),
-      photoDataUrl,
-      photoConsent: true,
-      attendanceDate,
-      checkInTime,
-      serverTimestamp: serverTimestamp(),
-      status: computedStatus,
-      lateExcuse: finalExcuse,
-    };
-
-    if (requiresParticipantLogin && user && participantVerifiedEmail) {
-      payload.participantEmail = participantVerifiedEmail.slice(0, 128);
-      payload.participantUid = user.uid;
-    }
+    submitLockRef.current = true;
+    setSubmitting(true);
 
     try {
-      await setDoc(doc(db, 'attendances', attendanceId), payload);
-
+      // Server-side rate limit & duplicate-burst protection (gracefully skipped if static hosting)
       try {
-        window.localStorage.setItem(
-          `presenza_last_checkin_${selectedEvent.id}`,
-          JSON.stringify({
-            attendanceId,
+        const guardResp = await fetch('/api/public/checkin-guard', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            eventId: selectedEvent.id,
             fullName: cleanName,
             classDepartment: cleanDept,
-            participantEmail:
-              requiresParticipantLogin && participantVerifiedEmail
-                ? participantVerifiedEmail
-                : '',
-          })
-        );
+          }),
+        });
+        const contentType = guardResp.headers.get('content-type') || '';
+        if (
+          contentType.includes('application/json') &&
+          (guardResp.status === 429 ||
+            guardResp.status === 409 ||
+            guardResp.status === 400)
+        ) {
+          const guardData = (await guardResp.json().catch(() => null)) as {
+            error?: string;
+          } | null;
+          const msg =
+            guardData?.error ||
+            'Duplicate or rapid check-in request blocked. Please wait a moment.';
+          setFormError(msg);
+          setFormDiagnostic({
+            title: 'Check-In Guard Rejected Submission',
+            message: msg,
+            failingUrl: `${window.location.origin}/api/public/checkin-guard`,
+            httpStatus: guardResp.status,
+            component: 'ParticipantCheckIn.handleSubmit (checkin-guard)',
+          });
+          return;
+        }
       } catch {
-        // Ignore storage quota restrictions cleanly
+        // Non-blocking fallback when backend guard endpoint is unreachable
       }
 
-      setReceipt({
-        id: attendanceId,
+      const attendanceId = generateSafeId('att');
+      const finalExcuse = computedStatus === 'Late' ? cleanExcuse : '';
+
+      const payload: Record<string, unknown> = {
         eventId: selectedEvent.id,
         eventName: selectedEvent.title,
-        fullName: cleanName,
-        classDepartment: cleanDept,
+        fullName: cleanName.slice(0, 100),
+        classDepartment: cleanDept.slice(0, 100),
         photoDataUrl,
+        photoConsent: true,
         attendanceDate,
         checkInTime,
-        recordedAtIso: submitMoment.toISOString(),
+        serverTimestamp: serverTimestamp(),
         status: computedStatus,
         lateExcuse: finalExcuse,
-        participantEmail:
-          requiresParticipantLogin && participantVerifiedEmail
-            ? participantVerifiedEmail
-            : undefined,
-      });
+      };
 
-      if (voiceSettings.enabled && voiceSettings.announceOnCheckIn) {
-        unlockBrowserAudio();
-        const announcementText = formatAnnouncementMessage(voiceSettings, {
-          name: cleanName,
-          department: cleanDept,
-          eventTitle: selectedEvent.title,
-        });
-        if (announcementText) {
-          setSpeakingReceipt(true);
-          void speakAnnouncement(announcementText, voiceSettings).finally(() => {
-            setSpeakingReceipt(false);
-          });
-        }
-      }
-    } catch (error) {
-      const msg = error instanceof Error ? error.message : String(error);
-      if (msg.toLowerCase().includes('permission')) {
-        setFormError(
-          'Unable to record attendance. This session may have closed or requires verified Google email login.'
-        );
-      } else {
-        setFormError('Network error while submitting attendance. Please try again.');
-      }
       try {
-        handleFirestoreError(
+        await setDoc(doc(db, 'attendances', attendanceId), payload);
+
+        const nextReceipt: CheckInReceipt = {
+          id: attendanceId,
+          eventId: selectedEvent.id,
+          eventName: selectedEvent.title,
+          fullName: cleanName,
+          classDepartment: cleanDept,
+          photoDataUrl,
+          attendanceDate,
+          checkInTime,
+          recordedAtIso: submitMoment.toISOString(),
+          status: computedStatus,
+          lateExcuse: finalExcuse,
+        };
+
+        saveReceiptForDedupe(dedupeKey, nextReceipt);
+
+        try {
+          window.localStorage.setItem(
+            `presenza_last_checkin_${selectedEvent.id}`,
+            JSON.stringify({
+              attendanceId,
+              fullName: cleanName,
+              classDepartment: cleanDept,
+              participantEmail: '',
+            })
+          );
+        } catch {
+          // Ignore storage quota restrictions cleanly
+        }
+
+        setReceipt(nextReceipt);
+
+        if (voiceSettings.enabled && voiceSettings.announceOnCheckIn) {
+          unlockBrowserAudio();
+          const announcementText = formatAnnouncementMessage(voiceSettings, {
+            name: cleanName,
+            department: cleanDept,
+            eventTitle: selectedEvent.title,
+          });
+          if (announcementText) {
+            setSpeakingReceipt(true);
+            void speakAnnouncement(announcementText, voiceSettings).finally(() => {
+              setSpeakingReceipt(false);
+            });
+          }
+        }
+      } catch (error) {
+        const { code, message } = extractFirebaseErrorDetails(error);
+        reportFirestoreError(
           error,
           OperationType.CREATE,
           `attendances/${attendanceId}`
         );
-      } catch {
-        // Error already logged for diagnostics; friendly message displayed in UI
+        if (
+          code.includes('permission-denied') ||
+          message.toLowerCase().includes('permission')
+        ) {
+          setFormError(
+            'Unable to record attendance. This session may have been closed or a field failed validation.'
+          );
+        } else {
+          setFormError(
+            `Unable to save attendance (${code || 'network-error'}): ${message}`
+          );
+        }
+        setFormDiagnostic({
+          title: 'Attendance Submission Failed',
+          message,
+          failingUrl: window.location.href,
+          firebaseCode: code || undefined,
+          firebaseMessage: message,
+          consoleError: `Firestore CREATE attendances/${attendanceId}: ${message}`,
+          component: 'ParticipantCheckIn.handleSubmit',
+        });
       }
     } finally {
+      submitLockRef.current = false;
       setSubmitting(false);
     }
   };
 
   const handleResetForNext = () => {
     setReceipt(null);
+    setDuplicateReceipt(null);
     setFullName('');
     setClassDepartment('');
     setPhotoDataUrl(null);
@@ -667,9 +884,7 @@ export default function ParticipantCheckIn({
 
           <div className="px-6 py-4 sm:px-8 bg-slate-50 border-t border-slate-200 flex flex-col sm:flex-row items-center justify-between gap-3">
             <span className="text-xs text-slate-500">
-              {receipt.participantEmail
-                ? 'Verified email recorded. You may close this page now.'
-                : 'No account or email required. You may close this page now.'}
+              No account or email required. You may close this page now.
             </span>
             <div className="w-full sm:w-auto flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
               {voiceSettings.enabled && (
@@ -729,20 +944,25 @@ export default function ParticipantCheckIn({
       {eventError && (
         <div
           role="alert"
-          className="mb-6 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-sm text-amber-900"
+          className="mb-6 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3.5 text-sm text-amber-900 space-y-2"
         >
-          <div className="flex items-start gap-2.5">
-            <AlertCircle className="w-5 h-5 text-amber-700 shrink-0 mt-0.5" />
-            <span>{eventError}</span>
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="flex items-start gap-2.5">
+              <AlertCircle className="w-5 h-5 text-amber-700 shrink-0 mt-0.5" />
+              <span>{eventError}</span>
+            </div>
+            {activeEvents.length > 0 && (
+              <button
+                type="button"
+                onClick={() => onSelectEventId(activeEvents[0].id)}
+                className="min-h-[40px] px-3.5 py-2 rounded-lg bg-amber-900 text-white text-xs font-semibold hover:bg-amber-800 transition-colors whitespace-nowrap shrink-0"
+              >
+                Switch to Active Session
+              </button>
+            )}
           </div>
-          {activeEvents.length > 0 && (
-            <button
-              type="button"
-              onClick={() => onSelectEventId(activeEvents[0].id)}
-              className="min-h-[40px] px-3.5 py-2 rounded-lg bg-amber-900 text-white text-xs font-semibold hover:bg-amber-800 transition-colors whitespace-nowrap shrink-0"
-            >
-              Switch to Active Session
-            </button>
+          {eventDiagnostic && (
+            <DiagnosticErrorPanel diagnostic={eventDiagnostic} />
           )}
         </div>
       )}
@@ -775,13 +995,9 @@ export default function ParticipantCheckIn({
         {/* Left Column: Session Information & Live Automatic Telemetry */}
         <section className="lg:col-span-5 bg-white border border-slate-200 rounded-2xl p-6 space-y-6">
           <div>
-            <div className="flex items-center justify-between gap-2 text-xs font-semibold text-blue-700">
+            <div className="flex flex-wrap items-center justify-between gap-2 text-xs font-semibold text-blue-700">
               <span>INSTANT QR CHECK-IN</span>
-              <span>
-                {requiresParticipantLogin
-                  ? 'EMAIL LOGIN REQUIRED'
-                  : 'NO LOGIN REQUIRED'}
-              </span>
+              <span>NO LOGIN REQUIRED</span>
             </div>
 
             {loadingEvents ? (
@@ -901,97 +1117,21 @@ export default function ParticipantCheckIn({
           <div className="pt-4 border-t border-slate-100 flex items-start gap-2.5 text-xs text-slate-500">
             <ShieldCheck className="w-4 h-4 text-slate-400 shrink-0 mt-0.5" />
             <span>
-              {requiresParticipantLogin
-                ? 'This session requires signing in with a Google email before submitting attendance.'
-                : 'No sign-up, account, email address, or password is required to mark attendance.'}
+              No sign-up, account, email address, OTP, or password is required to mark attendance.
             </span>
           </div>
         </section>
 
         {/* Right Column: Participant Attendance Form */}
-        <section className="lg:col-span-7 bg-white border border-slate-200 rounded-2xl p-6 sm:p-8">
+        <section className="lg:col-span-7 bg-white border border-slate-200 rounded-2xl p-5 sm:p-8 min-w-0">
           <div className="mb-6">
             <h2 className="text-xl font-bold text-slate-900">
               Participant Check-In Form
             </h2>
             <p className="text-sm text-slate-600 mt-1">
-              {requiresParticipantLogin
-                ? 'Verify your Google email, complete the three fields below, and confirm photo consent to submit.'
-                : 'Complete the three fields below and confirm photo consent to submit your attendance.'}
+              Complete the fields below, take or upload your verification photo, and confirm photo consent to submit.
             </p>
           </div>
-
-          {requiresParticipantLogin && (
-            <div className="mb-6 rounded-xl border border-blue-200 bg-blue-50/60 p-4 space-y-3">
-              {participantVerifiedEmail ? (
-                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                  <div className="flex items-center gap-2.5 min-w-0">
-                    <div className="w-9 h-9 rounded-lg bg-emerald-100 text-emerald-700 flex items-center justify-center shrink-0">
-                      <Mail className="w-4 h-4" />
-                    </div>
-                    <div className="min-w-0">
-                      <div className="text-xs font-semibold text-slate-500">
-                        Verified Participant Email
-                      </div>
-                      <div className="text-sm font-bold text-slate-900 truncate">
-                        {participantVerifiedEmail}
-                      </div>
-                    </div>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => void handleParticipantSignOut()}
-                    className="min-h-[38px] px-3 py-1.5 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 text-xs font-semibold text-slate-700 inline-flex items-center gap-1.5 whitespace-nowrap self-start sm:self-auto"
-                  >
-                    <LogOut className="w-3.5 h-3.5" />
-                    <span>Switch Account</span>
-                  </button>
-                </div>
-              ) : (
-                <div className="space-y-3">
-                  <div className="flex items-start gap-2.5">
-                    <Mail className="w-4 h-4 text-blue-700 shrink-0 mt-0.5" />
-                    <div>
-                      <p className="text-sm font-bold text-slate-900">
-                        Google Email Required for This Session
-                      </p>
-                      <p className="text-xs text-slate-600 mt-0.5">
-                        The organizer enabled email verification for this session. Sign in with your Google account to unlock submission.
-                      </p>
-                    </div>
-                  </div>
-
-                  {participantAuthError && (
-                    <div
-                      role="alert"
-                      className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-800 space-y-1"
-                    >
-                      <p className="font-semibold">{participantAuthError.title}</p>
-                      <p>{participantAuthError.message}</p>
-                    </div>
-                  )}
-
-                  <button
-                    type="button"
-                    onClick={() => void handleParticipantGoogleSignIn()}
-                    disabled={signingInParticipant}
-                    className="w-full sm:w-auto min-h-[44px] px-4 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold transition-colors inline-flex items-center justify-center gap-2 disabled:opacity-60"
-                  >
-                    {signingInParticipant ? (
-                      <Loader2 className="w-4 h-4 animate-spin" />
-                    ) : (
-                      <Mail className="w-4 h-4" />
-                    )}
-                    <span>
-                      {signingInParticipant
-                        ? 'Signing in...'
-                        : 'Sign in with Google'}
-                    </span>
-                  </button>
-                </div>
-              )}
-            </div>
-          )}
 
           <form onSubmit={handleSubmit} className="space-y-6" noValidate>
             {/* 1. Full Name */}
@@ -1016,7 +1156,7 @@ export default function ParticipantCheckIn({
               />
             </div>
 
-            {/* 2. Class / Department (free-text entry with customizable label) */}
+            {/* 2. Class / Department (free-text entry with optional quick-select presets) */}
             <div>
               <label
                 htmlFor="class-department"
@@ -1035,9 +1175,32 @@ export default function ParticipantCheckIn({
                 placeholder={`Type your ${customDepartmentLabel.toLowerCase()}`}
                 className="w-full min-h-[48px] px-4 py-3 text-base bg-white border border-slate-300 rounded-xl text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-600 focus:border-blue-600"
               />
+              {departmentPresetOptions.length > 0 && (
+                <div className="mt-2.5 flex flex-wrap gap-1.5">
+                  {departmentPresetOptions.map((preset) => {
+                    const selected =
+                      classDepartment.trim().toLowerCase() ===
+                      preset.toLowerCase();
+                    return (
+                      <button
+                        key={preset}
+                        type="button"
+                        onClick={() => setClassDepartment(preset)}
+                        className={`min-h-[36px] px-3 py-1 rounded-lg border text-xs font-semibold transition-colors ${
+                          selected
+                            ? 'border-blue-600 bg-blue-50 text-blue-800'
+                            : 'border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-700'
+                        }`}
+                      >
+                        {preset}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
             </div>
 
-            {/* 3. Photo (Camera or Upload) */}
+            {/* 3. Photo (Live Camera, Native Phone Camera, or Photo Upload) */}
             <div>
               <div className="flex items-center justify-between mb-2">
                 <span className="block text-sm font-semibold text-slate-900">
@@ -1050,14 +1213,14 @@ export default function ParticipantCheckIn({
                       setPhotoDataUrl(null);
                       setCameraError(null);
                     }}
-                    className="text-xs font-semibold text-blue-700 hover:text-blue-900 min-h-[32px] px-2"
+                    className="text-xs font-semibold text-blue-700 hover:text-blue-900 min-h-[36px] px-2"
                   >
                     Clear Photo
                   </button>
                 )}
               </div>
 
-              {/* Hidden Native Device Camera Input */}
+              {/* Hidden Native Device Camera Input (iOS/Android direct camera app) */}
               <input
                 ref={nativeCameraInputRef}
                 type="file"
@@ -1065,7 +1228,17 @@ export default function ParticipantCheckIn({
                 capture="user"
                 onChange={handleFileChange}
                 className="hidden"
-                aria-label="Take a photo with device camera"
+                aria-label="Take a photo with device camera app"
+              />
+
+              {/* Hidden Standard Photo Picker / Upload Input (works on iOS Photo Library, iPad, Android Gallery, Windows, macOS) */}
+              <input
+                ref={fileUploadInputRef}
+                type="file"
+                accept="image/*"
+                onChange={handleFileChange}
+                className="hidden"
+                aria-label="Upload a photo from your device"
               />
 
               {photoDataUrl ? (
@@ -1098,6 +1271,14 @@ export default function ParticipantCheckIn({
                         <Camera className="w-4 h-4" />
                         <span>Retake Picture</span>
                       </button>
+                      <button
+                        type="button"
+                        onClick={() => fileUploadInputRef.current?.click()}
+                        className="min-h-[44px] px-4 py-2 rounded-xl border border-slate-300 bg-white text-xs font-semibold text-slate-800 hover:bg-slate-100 transition-colors flex items-center gap-1.5"
+                      >
+                        <Upload className="w-4 h-4" />
+                        <span>Choose Different Photo</span>
+                      </button>
                     </div>
                   </div>
                 </div>
@@ -1113,6 +1294,12 @@ export default function ParticipantCheckIn({
                         cameraFacing === 'user' ? '-scale-x-100' : ''
                       }`}
                     />
+                    {!cameraReady && (
+                      <div className="absolute inset-0 flex flex-col items-center justify-center bg-slate-900/80 text-white text-xs gap-2">
+                        <Loader2 className="w-5 h-5 animate-spin" />
+                        <span>Starting camera...</span>
+                      </div>
+                    )}
                   </div>
                   <div className="p-3 bg-slate-900 flex flex-wrap items-center justify-between gap-2">
                     <button
@@ -1135,8 +1322,9 @@ export default function ParticipantCheckIn({
                     </button>
                     <button
                       type="button"
+                      disabled={!cameraReady || processingPhoto}
                       onClick={handleCaptureSnapshot}
-                      className="min-h-[44px] px-5 py-2 rounded-xl bg-blue-600 text-white text-sm font-semibold hover:bg-blue-500 transition-colors flex items-center gap-2"
+                      className="min-h-[44px] px-5 py-2 rounded-xl bg-blue-600 text-white text-sm font-semibold hover:bg-blue-500 disabled:opacity-50 transition-colors flex items-center gap-2"
                     >
                       <Camera className="w-4 h-4" />
                       <span>Capture Photo</span>
@@ -1144,25 +1332,37 @@ export default function ParticipantCheckIn({
                   </div>
                 </div>
               ) : (
-                <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50/70 p-5 space-y-3">
-                  <button
-                    type="button"
-                    onClick={() => void startCamera(cameraFacing)}
-                    disabled={processingPhoto}
-                    className="w-full min-h-[54px] px-4 py-3 rounded-xl bg-white border border-slate-300 text-sm font-semibold text-slate-900 hover:bg-slate-100 transition-colors flex items-center justify-center gap-2"
-                  >
-                    <Camera className="w-5 h-5 text-blue-700" />
-                    <span>Take Picture (Camera)</span>
-                  </button>
+                <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50/70 p-4 sm:p-5 space-y-3">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                    <button
+                      type="button"
+                      onClick={() => void startCamera(cameraFacing)}
+                      disabled={processingPhoto}
+                      className="w-full min-h-[52px] px-4 py-3 rounded-xl bg-white border border-slate-300 text-sm font-semibold text-slate-900 hover:bg-slate-100 transition-colors flex items-center justify-center gap-2"
+                    >
+                      <Camera className="w-5 h-5 text-blue-700 shrink-0" />
+                      <span>Take Picture (Live Camera)</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => fileUploadInputRef.current?.click()}
+                      disabled={processingPhoto}
+                      className="w-full min-h-[52px] px-4 py-3 rounded-xl bg-white border border-slate-300 text-sm font-semibold text-slate-800 hover:bg-slate-100 transition-colors flex items-center justify-center gap-2"
+                    >
+                      <Upload className="w-4 h-4 text-slate-700 shrink-0" />
+                      <span>Upload Photo</span>
+                    </button>
+                  </div>
 
                   <div className="flex flex-col sm:flex-row items-center justify-between gap-2 text-xs text-slate-500">
                     <span>
-                      Take a live selfie using your device camera to verify attendance.
+                      Works on iPhone, iPad, Android, Windows &amp; Mac.
                     </span>
                     <button
                       type="button"
                       onClick={() => nativeCameraInputRef.current?.click()}
-                      className="text-blue-700 hover:underline font-medium shrink-0"
+                      className="min-h-[36px] px-2 text-blue-700 hover:underline font-medium shrink-0"
                     >
                       Use native phone camera app
                     </button>
@@ -1178,9 +1378,12 @@ export default function ParticipantCheckIn({
               )}
 
               {cameraError && (
-                <p className="mt-2 text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+                <div
+                  role="alert"
+                  className="mt-2 text-xs text-amber-900 bg-amber-50 border border-amber-200 rounded-xl px-3.5 py-2.5 leading-relaxed"
+                >
                   {cameraError}
-                </p>
+                </div>
               )}
             </div>
 
@@ -1213,7 +1416,7 @@ export default function ParticipantCheckIn({
                   value={lateExcuse}
                   onChange={(e) => setLateExcuse(e.target.value)}
                   placeholder="e.g. Traffic delay, parent conference ran over, classroom handover..."
-                  className="w-full px-3.5 py-2.5 text-sm bg-white border border-amber-300 rounded-xl text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-amber-600"
+                  className="w-full px-3.5 py-2.5 text-base sm:text-sm bg-white border border-amber-300 rounded-xl text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-amber-600"
                 />
               </div>
             )}
@@ -1242,21 +1445,33 @@ export default function ParticipantCheckIn({
             {formError && (
               <div
                 role="alert"
-                className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-800 flex items-start gap-2.5"
+                className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-800 space-y-2"
               >
-                <AlertCircle className="w-5 h-5 text-rose-600 shrink-0 mt-0.5" />
-                <span>{formError}</span>
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+                  <div className="flex items-start gap-2.5">
+                    <AlertCircle className="w-5 h-5 text-rose-600 shrink-0 mt-0.5" />
+                    <span>{formError}</span>
+                  </div>
+                  {duplicateReceipt && (
+                    <button
+                      type="button"
+                      onClick={() => setReceipt(duplicateReceipt)}
+                      className="min-h-[38px] px-3 py-1.5 rounded-lg bg-rose-700 hover:bg-rose-800 text-white text-xs font-semibold whitespace-nowrap shrink-0 self-start sm:self-auto"
+                    >
+                      View Saved Receipt
+                    </button>
+                  )}
+                </div>
+                {formDiagnostic && (
+                  <DiagnosticErrorPanel diagnostic={formDiagnostic} />
+                )}
               </div>
             )}
 
             {/* Large SUBMIT ATTENDANCE CTA Button */}
             <button
               type="submit"
-              disabled={
-                submitting ||
-                !selectedEvent ||
-                (requiresParticipantLogin && !participantVerifiedEmail)
-              }
+              disabled={submitting || !selectedEvent}
               className="w-full h-14 px-6 rounded-xl bg-blue-700 hover:bg-blue-800 active:scale-[0.99] disabled:opacity-50 disabled:cursor-not-allowed text-white text-base font-bold tracking-wide transition-all flex items-center justify-center gap-2.5 shadow-sm"
             >
               {submitting ? (

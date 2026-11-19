@@ -1,10 +1,12 @@
 import {
+  AlertTriangle,
   Check,
   CheckCircle2,
   Clock,
   Copy,
   Download,
   ExternalLink,
+  Globe,
   ImagePlus,
   Loader2,
   Maximize2,
@@ -18,6 +20,11 @@ import { AnimatePresence, motion } from 'motion/react';
 import QRCode from 'qrcode';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { AttendanceRecord, EventRecord, OrganizationBranding } from '../types';
+import {
+  buildCheckInQrUrl,
+  buildFeedbackQrUrl,
+  normalizeAndValidatePublicUrl,
+} from '../utils/qrUrl';
 
 interface QrPosterModalProps {
   event: EventRecord;
@@ -35,6 +42,7 @@ interface QrPosterModalProps {
   onChangeBackgroundOpacity?: (opacity: number) => void;
   onRemoveBackground?: () => Promise<void>;
   branding?: OrganizationBranding | null;
+  onSavePublicAppUrl?: (nextUrl: string) => Promise<void>;
 }
 
 export default function QrPosterModal({
@@ -53,16 +61,51 @@ export default function QrPosterModal({
   onChangeBackgroundOpacity,
   onRemoveBackground,
   branding,
+  onSavePublicAppUrl,
 }: QrPosterModalProps) {
   const [qrMode, setQrMode] = useState<'checkin' | 'feedback'>('checkin');
   const [qrDataUrl, setQrDataUrl] = useState<string>('');
   const [copied, setCopied] = useState(false);
   const [expanded, setExpanded] = useState(false);
+  const [publicUrlDraft, setPublicUrlDraft] = useState(
+    () => branding?.publicAppUrl || ''
+  );
+  const [savingPublicUrl, setSavingPublicUrl] = useState(false);
+  const [publicUrlError, setPublicUrlError] = useState<string | null>(null);
+  const [editingPublicUrl, setEditingPublicUrl] = useState(false);
   const bgFileInputRef = useRef<HTMLInputElement | null>(null);
 
-  const checkInUrl = `${window.location.origin}/?event=${encodeURIComponent(event.id)}`;
-  const feedbackUrl = `${window.location.origin}/?view=feedback&event=${encodeURIComponent(event.id)}`;
-  const activeQrUrl = qrMode === 'feedback' ? feedbackUrl : checkInUrl;
+  useEffect(() => {
+    setPublicUrlDraft(branding?.publicAppUrl || '');
+  }, [branding?.publicAppUrl]);
+
+  const checkInInfo = buildCheckInQrUrl(event.id, branding?.publicAppUrl);
+  const feedbackInfo = buildFeedbackQrUrl(event.id, branding?.publicAppUrl);
+  const activeInfo = qrMode === 'feedback' ? feedbackInfo : checkInInfo;
+  const activeQrUrl = activeInfo.url;
+  const qrResolution = activeInfo.resolution;
+
+  const handleSavePublicUrlSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!onSavePublicAppUrl) return;
+    setPublicUrlError(null);
+    const check = normalizeAndValidatePublicUrl(publicUrlDraft);
+    if (!check.ok) {
+      setPublicUrlError(check.error);
+      return;
+    }
+    setSavingPublicUrl(true);
+    try {
+      await onSavePublicAppUrl(check.origin);
+      setEditingPublicUrl(false);
+    } catch (err) {
+      setPublicUrlError(
+        err instanceof Error ? err.message : 'Unable to save public QR URL.'
+      );
+    } finally {
+      setSavingPublicUrl(false);
+    }
+  };
 
   useEffect(() => {
     let active = true;
@@ -281,6 +324,96 @@ export default function QrPosterModal({
             </div>
 
             <div className="px-5 py-4 bg-white border-t border-slate-200 space-y-3">
+              {!qrResolution.isPublic && (
+                <div
+                  role="alert"
+                  className="rounded-xl border border-amber-300 bg-amber-50 p-3 text-xs text-amber-950 space-y-2"
+                >
+                  <div className="flex items-start gap-2">
+                    <AlertTriangle className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
+                    <div className="leading-relaxed">
+                      <span className="font-bold">Private Preview URL Detected: </span>
+                      <span>{qrResolution.warning}</span>
+                    </div>
+                  </div>
+                  {onSavePublicAppUrl && (
+                    <form
+                      onSubmit={(e) => void handleSavePublicUrlSubmit(e)}
+                      className="flex flex-col sm:flex-row gap-1.5"
+                    >
+                      <input
+                        type="url"
+                        value={publicUrlDraft}
+                        onChange={(e) => setPublicUrlDraft(e.target.value)}
+                        placeholder="https://your-app.vercel.app"
+                        aria-label="Public Vercel production URL for QR codes"
+                        className="flex-1 min-w-0 min-h-[34px] px-2.5 py-1 text-xs font-mono-tabular bg-white border border-amber-300 rounded-lg text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-600"
+                      />
+                      <button
+                        type="submit"
+                        disabled={savingPublicUrl}
+                        className="min-h-[34px] px-3 py-1 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold whitespace-nowrap disabled:opacity-50"
+                      >
+                        {savingPublicUrl ? 'Saving...' : 'Save Public URL'}
+                      </button>
+                    </form>
+                  )}
+                  {publicUrlError && (
+                    <p className="text-[11px] text-rose-700 font-medium">
+                      {publicUrlError}
+                    </p>
+                  )}
+                </div>
+              )}
+
+              {qrResolution.isPublic && onSavePublicAppUrl && (
+                <div className="flex items-center justify-between gap-2 text-[11px] text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-lg px-2.5 py-1.5">
+                  <span className="inline-flex items-center gap-1.5 font-medium truncate">
+                    <Globe className="w-3.5 h-3.5 text-emerald-700 shrink-0" />
+                    <span className="truncate">
+                      Public QR Host: <strong className="font-mono-tabular">{qrResolution.origin}</strong>
+                    </span>
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setEditingPublicUrl((v) => !v)}
+                    className="text-emerald-900 font-semibold hover:underline shrink-0"
+                  >
+                    {editingPublicUrl ? 'Cancel' : 'Change'}
+                  </button>
+                </div>
+              )}
+
+              {qrResolution.isPublic && editingPublicUrl && onSavePublicAppUrl && (
+                <form
+                  onSubmit={(e) => void handleSavePublicUrlSubmit(e)}
+                  className="space-y-1.5"
+                >
+                  <div className="flex items-center gap-1.5">
+                    <input
+                      type="url"
+                      value={publicUrlDraft}
+                      onChange={(e) => setPublicUrlDraft(e.target.value)}
+                      placeholder="https://your-app.vercel.app (leave blank for auto)"
+                      aria-label="Edit public QR domain URL"
+                      className="flex-1 min-w-0 min-h-[34px] px-2.5 py-1 text-xs font-mono-tabular bg-slate-50 border border-slate-300 rounded-lg text-slate-900"
+                    />
+                    <button
+                      type="submit"
+                      disabled={savingPublicUrl}
+                      className="min-h-[34px] px-3 py-1 rounded-lg bg-blue-700 hover:bg-blue-800 text-white text-xs font-semibold whitespace-nowrap disabled:opacity-50"
+                    >
+                      {savingPublicUrl ? 'Saving...' : 'Save'}
+                    </button>
+                  </div>
+                  {publicUrlError && (
+                    <p className="text-[11px] text-rose-700 font-medium">
+                      {publicUrlError}
+                    </p>
+                  )}
+                </form>
+              )}
+
               <div className="flex items-center gap-2">
                 <input
                   type="text"

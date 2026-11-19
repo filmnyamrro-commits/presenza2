@@ -134,12 +134,27 @@ export const DEFAULT_FEEDBACK_STATEMENTS: FeedbackStatement[] = [
 export function buildDefaultFeedbackConfig(eventId = 'default'): FeedbackConfig {
   return {
     eventId,
+    formHeading: 'Feedback & Evaluation',
     introNote:
       'Your honest feedback helps us improve future workshops, seminars, and professional development sessions.',
+    ratingSectionTitle: '1. Satisfaction Rating (1–5 Stars)',
+    ratingSectionSubtitle:
+      'Tap a star from 1 (Needs improvement) to 5 (Excellent) for each area.',
+    checklistSectionTitle: '2. Quick Feedback Checklist',
+    checklistSectionSubtitle:
+      'Tick all statements that match your experience in this session.',
+    commentQuestionLabel: '3. Written Comments',
+    commentPlaceholder:
+      'Please share your comments, suggestions, or recommendations.',
     requireWrittenComment: false,
     ratingCriteria: DEFAULT_RATING_CRITERIA.map((c) => ({ ...c })),
     categories: DEFAULT_FEEDBACK_CATEGORIES.map((c) => ({ ...c })),
     statements: DEFAULT_FEEDBACK_STATEMENTS.map((s) => ({ ...s })),
+    customQuestions: [],
+    scheduleEnabled: false,
+    openAtIso: '',
+    closeAtIso: '',
+    scheduleClosedMessage: '',
   };
 }
 
@@ -151,10 +166,41 @@ export function mergeFeedbackConfig(
   if (!partial) return base;
   return {
     eventId: partial.eventId || fallbackEventId,
+    formHeading:
+      typeof partial.formHeading === 'string' && partial.formHeading.trim()
+        ? partial.formHeading.slice(0, 120)
+        : base.formHeading,
     introNote:
       typeof partial.introNote === 'string'
         ? partial.introNote.slice(0, 400)
         : base.introNote,
+    ratingSectionTitle:
+      typeof partial.ratingSectionTitle === 'string' &&
+      partial.ratingSectionTitle.trim()
+        ? partial.ratingSectionTitle.slice(0, 140)
+        : base.ratingSectionTitle,
+    ratingSectionSubtitle:
+      typeof partial.ratingSectionSubtitle === 'string'
+        ? partial.ratingSectionSubtitle.slice(0, 300)
+        : base.ratingSectionSubtitle,
+    checklistSectionTitle:
+      typeof partial.checklistSectionTitle === 'string' &&
+      partial.checklistSectionTitle.trim()
+        ? partial.checklistSectionTitle.slice(0, 140)
+        : base.checklistSectionTitle,
+    checklistSectionSubtitle:
+      typeof partial.checklistSectionSubtitle === 'string'
+        ? partial.checklistSectionSubtitle.slice(0, 300)
+        : base.checklistSectionSubtitle,
+    commentQuestionLabel:
+      typeof partial.commentQuestionLabel === 'string' &&
+      partial.commentQuestionLabel.trim()
+        ? partial.commentQuestionLabel.slice(0, 160)
+        : base.commentQuestionLabel,
+    commentPlaceholder:
+      typeof partial.commentPlaceholder === 'string'
+        ? partial.commentPlaceholder.slice(0, 240)
+        : base.commentPlaceholder,
     requireWrittenComment:
       typeof partial.requireWrittenComment === 'boolean'
         ? partial.requireWrittenComment
@@ -186,7 +232,152 @@ export function mergeFeedbackConfig(
           required: typeof s.required === 'boolean' ? s.required : false,
         }))
       : base.statements,
+    customQuestions: Array.isArray(partial.customQuestions)
+      ? partial.customQuestions.slice(0, 6).map((q) => ({
+          id: String(q.id || ''),
+          prompt: String(q.prompt || '').slice(0, 200),
+          placeholder: String(q.placeholder || '').slice(0, 200),
+          active: typeof q.active === 'boolean' ? q.active : true,
+          required: typeof q.required === 'boolean' ? q.required : false,
+        }))
+      : base.customQuestions,
+    scheduleEnabled:
+      typeof partial.scheduleEnabled === 'boolean'
+        ? partial.scheduleEnabled
+        : false,
+    openAtIso:
+      typeof partial.openAtIso === 'string'
+        ? partial.openAtIso.slice(0, 40)
+        : '',
+    closeAtIso:
+      typeof partial.closeAtIso === 'string'
+        ? partial.closeAtIso.slice(0, 40)
+        : '',
+    scheduleClosedMessage:
+      typeof partial.scheduleClosedMessage === 'string'
+        ? partial.scheduleClosedMessage.slice(0, 300)
+        : '',
   };
+}
+
+export interface FeedbackScheduleEvaluation {
+  status: 'always-open' | 'open' | 'before-open' | 'closed';
+  isOpen: boolean;
+  openAtMs: number | null;
+  closeAtMs: number | null;
+  openAtDate: Date | null;
+  closeAtDate: Date | null;
+}
+
+export function parseIsoTimestampMs(iso?: string | null): number | null {
+  if (!iso || !iso.trim()) return null;
+  const ms = Date.parse(iso.trim());
+  return Number.isFinite(ms) ? ms : null;
+}
+
+export function evaluateFeedbackSchedule(
+  config: Pick<FeedbackConfig, 'scheduleEnabled' | 'openAtIso' | 'closeAtIso'>,
+  nowMs: number = Date.now()
+): FeedbackScheduleEvaluation {
+  if (!config.scheduleEnabled) {
+    return {
+      status: 'always-open',
+      isOpen: true,
+      openAtMs: null,
+      closeAtMs: null,
+      openAtDate: null,
+      closeAtDate: null,
+    };
+  }
+
+  const openAtMs = parseIsoTimestampMs(config.openAtIso);
+  const closeAtMs = parseIsoTimestampMs(config.closeAtIso);
+  const openAtDate = openAtMs !== null ? new Date(openAtMs) : null;
+  const closeAtDate = closeAtMs !== null ? new Date(closeAtMs) : null;
+
+  if (openAtMs !== null && nowMs < openAtMs) {
+    return {
+      status: 'before-open',
+      isOpen: false,
+      openAtMs,
+      closeAtMs,
+      openAtDate,
+      closeAtDate,
+    };
+  }
+
+  if (closeAtMs !== null && nowMs > closeAtMs) {
+    return {
+      status: 'closed',
+      isOpen: false,
+      openAtMs,
+      closeAtMs,
+      openAtDate,
+      closeAtDate,
+    };
+  }
+
+  return {
+    status: 'open',
+    isOpen: true,
+    openAtMs,
+    closeAtMs,
+    openAtDate,
+    closeAtDate,
+  };
+}
+
+export function formatScheduleDateTime(isoOrDate: string | Date): string {
+  const date =
+    typeof isoOrDate === 'string' ? new Date(isoOrDate) : isoOrDate;
+  if (Number.isNaN(date.getTime())) return '';
+  return date.toLocaleString(undefined, {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+}
+
+export function formatScheduleCountdown(msRemaining: number): string {
+  const totalSec = Math.max(0, Math.floor(msRemaining / 1000));
+  const days = Math.floor(totalSec / 86400);
+  const hours = Math.floor((totalSec % 86400) / 3600);
+  const minutes = Math.floor((totalSec % 3600) / 60);
+  const seconds = totalSec % 60;
+  if (days > 0) return `${days}d ${hours}h ${minutes}m`;
+  if (hours > 0) return `${hours}h ${minutes}m ${seconds}s`;
+  if (minutes > 0) return `${minutes}m ${seconds}s`;
+  return `${seconds}s`;
+}
+
+export function isoToLocalDateAndTime(iso: string): {
+  date: string;
+  time: string;
+} {
+  const ms = parseIsoTimestampMs(iso);
+  if (ms === null) return { date: '', time: '' };
+  const d = new Date(ms);
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  const hour = String(d.getHours()).padStart(2, '0');
+  const minute = String(d.getMinutes()).padStart(2, '0');
+  return {
+    date: `${year}-${month}-${day}`,
+    time: `${hour}:${minute}`,
+  };
+}
+
+export function localDateAndTimeToIso(dateStr: string, timeStr: string): string {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) return '';
+  const cleanTime = /^\d{2}:\d{2}$/.test(timeStr) ? timeStr : '00:00';
+  const [y, m, d] = dateStr.split('-').map(Number);
+  const [hh, mm] = cleanTime.split(':').map(Number);
+  const localDate = new Date(y, (m || 1) - 1, d || 1, hh || 0, mm || 0, 0, 0);
+  if (Number.isNaN(localDate.getTime())) return '';
+  return localDate.toISOString();
 }
 
 export const DEFAULT_RECOGNITION_CATEGORIES: ReadonlyArray<{

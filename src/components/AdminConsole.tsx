@@ -11,7 +11,6 @@ import {
   Edit3,
   FileText,
   ImagePlus,
-  Laptop,
   Loader2,
   Lock,
   LogOut,
@@ -116,13 +115,16 @@ import {
   stopAllAnnouncements,
   unlockBrowserAudio,
 } from '../utils/voiceAnnouncement';
+import {
+  normalizeAndValidatePublicUrl,
+  resolveQrOrigin,
+} from '../utils/qrUrl';
 import AdminFeedbackModule from './AdminFeedbackModule';
 import AdminRecognitionModule from './AdminRecognitionModule';
 import AdminVoiceSettingsModule from './AdminVoiceSettingsModule';
 import CertificateCustomizerModal from './CertificateCustomizerModal';
 import EventQrThumbnail from './EventQrThumbnail';
 import LiveAnimatedDashboard from './LiveAnimatedDashboard';
-import OwnerDeviceManagerModal from './OwnerDeviceManagerModal';
 import QrPosterModal from './QrPosterModal';
 
 export type AdminSectionTab =
@@ -209,8 +211,9 @@ export default function AdminConsole({
     null
   );
 
-  // School / Company Logo & Name branding state
+  // School / Company Logo & Name branding state + Public QR Production URL
   const [orgNameInput, setOrgNameInput] = useState('');
+  const [publicAppUrlInput, setPublicAppUrlInput] = useState('');
   const [savingBranding, setSavingBranding] = useState(false);
   const [brandingError, setBrandingError] = useState<string | null>(null);
   const [brandingSaved, setBrandingSaved] = useState(false);
@@ -219,6 +222,10 @@ export default function AdminConsole({
   useEffect(() => {
     setOrgNameInput(branding?.organizationName || '');
   }, [branding?.organizationName]);
+
+  useEffect(() => {
+    setPublicAppUrlInput(branding?.publicAppUrl || '');
+  }, [branding?.publicAppUrl]);
 
   // Event form state
   const [evTitle, setEvTitle] = useState('');
@@ -239,8 +246,6 @@ export default function AdminConsole({
   const [evPrincipalName, setEvPrincipalName] = useState('');
   const [evTheme, setEvTheme] = useState('');
   const [evTopic, setEvTopic] = useState('');
-  const [evRequireParticipantLogin, setEvRequireParticipantLogin] =
-    useState(false);
   const [timeFormatMode, setTimeFormatMode] = useState<'24h' | '12h'>('24h');
   const [savingEvent, setSavingEvent] = useState(false);
   const [eventFormError, setEventFormError] = useState<string | null>(null);
@@ -342,7 +347,6 @@ export default function AdminConsole({
   const [removingAdminEmail, setRemovingAdminEmail] = useState<string | null>(
     null
   );
-  const [showDeviceManager, setShowDeviceManager] = useState(false);
 
   // Verify admin authorization (email allowlist, legacy UID doc, or bootstrap owner)
   useEffect(() => {
@@ -867,11 +871,13 @@ export default function AdminConsole({
     setBrandingError(null);
     setBrandingSaved(false);
     setSavingBranding(true);
+    const currentPublicUrl = branding?.publicAppUrl || '';
     try {
       const logoDataUrl = await compressLogoFile(file);
       await setDoc(doc(db, 'branding', 'default'), {
         organizationName: orgNameInput.trim().slice(0, 120),
         logoDataUrl,
+        publicAppUrl: currentPublicUrl,
         updatedByUid: user.uid,
         updatedAt: serverTimestamp(),
       });
@@ -894,13 +900,15 @@ export default function AdminConsole({
     setSavingBranding(true);
     const cleanName = orgNameInput.trim().slice(0, 120);
     const currentLogo = branding?.logoDataUrl || '';
+    const currentPublicUrl = branding?.publicAppUrl || '';
     try {
-      if (!cleanName && !currentLogo) {
+      if (!cleanName && !currentLogo && !currentPublicUrl) {
         await deleteDoc(doc(db, 'branding', 'default'));
       } else {
         await setDoc(doc(db, 'branding', 'default'), {
           organizationName: cleanName,
           logoDataUrl: currentLogo,
+          publicAppUrl: currentPublicUrl,
           updatedByUid: user.uid,
           updatedAt: serverTimestamp(),
         });
@@ -915,19 +923,56 @@ export default function AdminConsole({
     }
   };
 
+  const handleSavePublicAppUrl = async (nextUrlRaw: string) => {
+    if (!user) return;
+    setBrandingError(null);
+    setBrandingSaved(false);
+    const check = normalizeAndValidatePublicUrl(nextUrlRaw);
+    if (!check.ok) {
+      setBrandingError(check.error);
+      throw new Error(check.error);
+    }
+    setSavingBranding(true);
+    const cleanName = orgNameInput.trim().slice(0, 120);
+    const currentLogo = branding?.logoDataUrl || '';
+    try {
+      if (!cleanName && !currentLogo && !check.origin) {
+        await deleteDoc(doc(db, 'branding', 'default'));
+      } else {
+        await setDoc(doc(db, 'branding', 'default'), {
+          organizationName: cleanName,
+          logoDataUrl: currentLogo,
+          publicAppUrl: check.origin,
+          updatedByUid: user.uid,
+          updatedAt: serverTimestamp(),
+        });
+      }
+      setPublicAppUrlInput(check.origin);
+      setBrandingSaved(true);
+      window.setTimeout(() => setBrandingSaved(false), 2500);
+    } catch (error) {
+      setBrandingError('Unable to save public QR URL.');
+      handleFirestoreError(error, OperationType.WRITE, 'branding/default');
+    } finally {
+      setSavingBranding(false);
+    }
+  };
+
   const handleRemoveOrgLogo = async () => {
     if (!user) return;
     setBrandingError(null);
     setBrandingSaved(false);
     setSavingBranding(true);
     const cleanName = orgNameInput.trim().slice(0, 120);
+    const currentPublicUrl = branding?.publicAppUrl || '';
     try {
-      if (!cleanName) {
+      if (!cleanName && !currentPublicUrl) {
         await deleteDoc(doc(db, 'branding', 'default'));
       } else {
         await setDoc(doc(db, 'branding', 'default'), {
           organizationName: cleanName,
           logoDataUrl: '',
+          publicAppUrl: currentPublicUrl,
           updatedByUid: user.uid,
           updatedAt: serverTimestamp(),
         });
@@ -1048,7 +1093,6 @@ export default function AdminConsole({
     setEvPrincipalName('');
     setEvTheme('');
     setEvTopic('');
-    setEvRequireParticipantLogin(false);
     setEventFormError(null);
     setShowEventModal(true);
   };
@@ -1071,7 +1115,6 @@ export default function AdminConsole({
     setEvPrincipalName(ev.principalName || '');
     setEvTheme(ev.theme || '');
     setEvTopic(ev.topic || '');
-    setEvRequireParticipantLogin(Boolean(ev.requireParticipantLogin));
     setEventFormError(null);
     setShowEventModal(true);
   };
@@ -1170,13 +1213,13 @@ export default function AdminConsole({
           lateCutoffTime: evCutoffTime,
           cutoffTimestamp: cutoffTs,
           departmentLabel: deptLabel,
-          departmentPresets: '',
+          departmentPresets: editingEvent.departmentPresets || '',
           consentText: consentStatement,
           facilitators,
           principalName,
           theme,
           topic,
-          requireParticipantLogin: evRequireParticipantLogin,
+          requireParticipantLogin: false,
           updatedAt: serverTimestamp(),
         });
       } else {
@@ -1196,7 +1239,7 @@ export default function AdminConsole({
           principalName,
           theme,
           topic,
-          requireParticipantLogin: evRequireParticipantLogin,
+          requireParticipantLogin: false,
           status: 'active' as const,
           createdByUid: user.uid,
         };
@@ -1485,7 +1528,7 @@ export default function AdminConsole({
               Administrator Sign In
             </h1>
             <p className="mt-2 text-sm text-slate-600 leading-relaxed">
-              Sign in with an authorized teacher or administrator Google account. Participants check in via QR code based on each session&apos;s settings.
+              Sign in with an authorized teacher or administrator Google account. Participants check in directly via the attendance link or QR code without logging in.
             </p>
           </div>
 
@@ -1619,17 +1662,6 @@ export default function AdminConsole({
             <ShieldCheck className="w-4 h-4 text-blue-700" />
             <span>Manage Admins ({authorizedAdmins.length + 1})</span>
           </button>
-          {user.email &&
-            normalizeAdminEmail(user.email) === BOOTSTRAPPED_ADMIN_EMAIL && (
-              <button
-                type="button"
-                onClick={() => setShowDeviceManager(true)}
-                className="min-h-[44px] px-4 py-2 rounded-xl border border-blue-200 bg-blue-50 hover:bg-blue-100 text-blue-900 text-sm font-semibold transition-colors inline-flex items-center gap-2 whitespace-nowrap shrink-0"
-              >
-                <Laptop className="w-4 h-4 text-blue-700" />
-                <span>Device Security</span>
-              </button>
-            )}
           {(events.length > 0 || attendances.length > 0) && (
             <button
               type="button"
@@ -1762,6 +1794,7 @@ export default function AdminConsole({
         <AdminFeedbackModule
           user={user}
           events={events}
+          branding={branding}
           feedbackConfigsById={feedbackConfigsById}
           feedbackSubmissions={feedbackSubmissions}
           onOpenFeedbackForm={(eventId) => {
@@ -1878,6 +1911,64 @@ export default function AdminConsole({
                 Remove Logo
               </button>
             )}
+          </form>
+        </div>
+
+        <div className="mt-4 pt-4 border-t border-slate-100 flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+          {(() => {
+            const qrStatus = resolveQrOrigin(branding?.publicAppUrl);
+            return (
+              <div className="min-w-0 space-y-0.5">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-xs font-bold uppercase tracking-wider text-slate-700">
+                    Public QR Production URL (Vercel / Custom Domain)
+                  </span>
+                  <span
+                    className={`inline-flex items-center px-2 py-0.5 rounded text-[11px] font-semibold border ${
+                      qrStatus.isPublic
+                        ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
+                        : 'bg-amber-50 text-amber-900 border-amber-300'
+                    }`}
+                  >
+                    {qrStatus.isPublic
+                      ? `Public HTTPS: ${qrStatus.origin}`
+                      : 'Private Preview — Set Vercel URL'}
+                  </span>
+                </div>
+                <p className="text-xs text-slate-500">
+                  {qrStatus.isPublic
+                    ? 'All generated Check-In & Feedback QR codes point to this public HTTPS host so any Android, iPhone, or iPad can scan without login.'
+                    : qrStatus.warning}
+                </p>
+              </div>
+            );
+          })()}
+
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              void handleSavePublicAppUrl(publicAppUrlInput).catch(() => {
+                // Error already surfaced in brandingError
+              });
+            }}
+            className="flex flex-wrap items-center gap-2 shrink-0"
+          >
+            <input
+              type="url"
+              maxLength={250}
+              value={publicAppUrlInput}
+              onChange={(e) => setPublicAppUrlInput(e.target.value)}
+              placeholder="https://your-app.vercel.app"
+              aria-label="Public QR Production URL"
+              className="min-h-[40px] w-full sm:w-72 px-3 py-2 text-xs font-mono-tabular bg-slate-50 border border-slate-300 rounded-xl text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-600"
+            />
+            <button
+              type="submit"
+              disabled={savingBranding}
+              className="min-h-[40px] px-3.5 py-2 rounded-xl bg-blue-700 hover:bg-blue-800 text-white text-xs font-semibold transition-colors whitespace-nowrap disabled:opacity-50"
+            >
+              Save QR URL
+            </button>
           </form>
         </div>
 
@@ -2008,6 +2099,7 @@ export default function AdminConsole({
                       <EventQrThumbnail
                         eventId={ev.id}
                         eventTitle={ev.title}
+                        publicAppUrl={branding?.publicAppUrl}
                         onClick={() => setQrEvent(ev)}
                       />
 
@@ -2025,19 +2117,9 @@ export default function AdminConsole({
                           >
                             {ev.status === 'active' ? 'Active' : 'Closed'}
                           </span>
-                          <span
-                            className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-semibold ${
-                              ev.requireParticipantLogin
-                                ? 'bg-blue-50 text-blue-800 border border-blue-200'
-                                : 'bg-slate-50 text-slate-600 border border-slate-200'
-                            }`}
-                          >
-                            <Mail className="w-3 h-3" />
-                            <span>
-                              {ev.requireParticipantLogin
-                                ? 'Email Login'
-                                : 'No Login'}
-                            </span>
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-semibold bg-blue-50 text-blue-800 border border-blue-200">
+                            <QrCode className="w-3 h-3" />
+                            <span>Instant QR (No Login)</span>
                           </span>
                         </div>
                         <div className="flex flex-wrap items-center gap-1.5 text-xs text-slate-500">
@@ -3174,59 +3256,16 @@ export default function AdminConsole({
                   />
                 </div>
 
-                {/* Participant Check-In Login Mode */}
-                <div className="pt-2 border-t border-slate-100 space-y-2">
-                  <div className="text-xs font-semibold text-slate-700">
-                    Participant Check-In Login Mode
-                  </div>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-                    <label
-                      className={`flex items-start gap-2.5 p-3 rounded-xl border cursor-pointer transition-colors ${
-                        !evRequireParticipantLogin
-                          ? 'border-blue-600 bg-blue-50/50'
-                          : 'border-slate-200 hover:bg-slate-50'
-                      }`}
-                    >
-                      <input
-                        type="radio"
-                        name="participant-login-mode"
-                        checked={!evRequireParticipantLogin}
-                        onChange={() => setEvRequireParticipantLogin(false)}
-                        className="mt-0.5 text-blue-700 focus:ring-blue-600"
-                      />
-                      <div>
-                        <div className="text-xs font-bold text-slate-900">
-                          Without Email (No Login)
-                        </div>
-                        <div className="text-[11px] text-slate-600 mt-0.5">
-                          Instant QR check-in with no Google login required.
-                        </div>
-                      </div>
-                    </label>
-
-                    <label
-                      className={`flex items-start gap-2.5 p-3 rounded-xl border cursor-pointer transition-colors ${
-                        evRequireParticipantLogin
-                          ? 'border-blue-600 bg-blue-50/50'
-                          : 'border-slate-200 hover:bg-slate-50'
-                      }`}
-                    >
-                      <input
-                        type="radio"
-                        name="participant-login-mode"
-                        checked={evRequireParticipantLogin}
-                        onChange={() => setEvRequireParticipantLogin(true)}
-                        className="mt-0.5 text-blue-700 focus:ring-blue-600"
-                      />
-                      <div>
-                        <div className="text-xs font-bold text-slate-900">
-                          With Google Email Login
-                        </div>
-                        <div className="text-[11px] text-slate-600 mt-0.5">
-                          Participants sign in with Google before submitting.
-                        </div>
-                      </div>
-                    </label>
+                {/* Instant Participant Access Notice */}
+                <div className="pt-2 border-t border-slate-100">
+                  <div className="rounded-xl border border-emerald-200 bg-emerald-50/70 px-3.5 py-2.5 flex items-start gap-2.5">
+                    <ShieldCheck className="w-4 h-4 text-emerald-700 shrink-0 mt-0.5" />
+                    <div className="text-xs text-emerald-950">
+                      <span className="font-bold">
+                        Direct Participant Check-In (No Login Required):
+                      </span>{' '}
+                      Anyone with the session link or QR code can check in immediately without email, password, or OTP verification. Administrator dashboards remain protected.
+                    </div>
                   </div>
                 </div>
               </div>
@@ -3281,6 +3320,7 @@ export default function AdminConsole({
           onChangeBackgroundOpacity={handleChangeDashboardBgOpacity}
           onRemoveBackground={handleRemoveDashboardBg}
           branding={branding}
+          onSavePublicAppUrl={handleSavePublicAppUrl}
         />
       )}
 
@@ -3885,16 +3925,6 @@ export default function AdminConsole({
           onClose={() => setShowCertCustomizer(false)}
         />
       )}
-
-      {/* Primary Owner Cross-Device Access & Revocation Modal */}
-      {showDeviceManager &&
-        user.email &&
-        normalizeAdminEmail(user.email) === BOOTSTRAPPED_ADMIN_EMAIL && (
-          <OwnerDeviceManagerModal
-            user={user}
-            onClose={() => setShowDeviceManager(false)}
-          />
-        )}
     </div>
   );
 }

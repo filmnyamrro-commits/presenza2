@@ -1,19 +1,22 @@
 import QRCode from 'qrcode';
 import { useEffect, useState } from 'react';
+import { buildCheckInQrUrl } from '../utils/qrUrl';
 
 interface EventQrThumbnailProps {
   eventId: string;
   eventTitle: string;
+  publicAppUrl?: string;
   onClick: () => void;
 }
 
 export default function EventQrThumbnail({
   eventId,
   eventTitle,
+  publicAppUrl,
   onClick,
 }: EventQrThumbnailProps) {
   const [src, setSrc] = useState<string>('');
-  const checkInUrl = `${window.location.origin}/?event=${encodeURIComponent(eventId)}`;
+  const { url: checkInUrl } = buildCheckInQrUrl(eventId, publicAppUrl);
 
   useEffect(() => {
     let active = true;

@@ -298,6 +298,11 @@
           "maxLength": 350000,
           "description": "Compressed PNG, JPEG, or WebP data URL of the school or company logo."
         },
+        "publicAppUrl": {
+          "type": "string",
+          "maxLength": 250,
+          "description": "Public HTTPS production origin (e.g. Vercel URL) encoded inside generated QR codes."
+        },
         "updatedByUid": {
           "type": "string",
           "minLength": 1,
@@ -415,7 +420,7 @@
     },
     "FeedbackConfig": {
       "title": "FeedbackConfig",
-      "description": "Customizable participant feedback rating areas, categories, and checklist statements per event or global default.",
+      "description": "Customizable participant feedback questions, menu statements, rating areas, categories, checklist statements, and submission schedule per event or global default.",
       "type": "object",
       "properties": {
         "eventId": {
@@ -424,11 +429,25 @@
           "maxLength": 128,
           "pattern": "^[a-zA-Z0-9_\\-]+$"
         },
+        "formHeading": { "type": "string", "maxLength": 120 },
         "introNote": { "type": "string", "maxLength": 400 },
+        "ratingSectionTitle": { "type": "string", "maxLength": 140 },
+        "ratingSectionSubtitle": { "type": "string", "maxLength": 300 },
+        "checklistSectionTitle": { "type": "string", "maxLength": 140 },
+        "checklistSectionSubtitle": { "type": "string", "maxLength": 300 },
+        "commentQuestionLabel": { "type": "string", "maxLength": 160 },
+        "commentPlaceholder": { "type": "string", "maxLength": 240 },
         "requireWrittenComment": { "type": "boolean" },
         "ratingCriteria": { "type": "array", "maxItems": 12 },
         "categories": { "type": "array", "maxItems": 12 },
         "statements": { "type": "array", "maxItems": 40 },
+        "customQuestions": { "type": "array", "maxItems": 6 },
+        "scheduleEnabled": { "type": "boolean" },
+        "openAtIso": { "type": "string", "maxLength": 40 },
+        "closeAtIso": { "type": "string", "maxLength": 40 },
+        "openTimestamp": { "type": "string", "format": "date-time" },
+        "closeTimestamp": { "type": "string", "format": "date-time" },
+        "scheduleClosedMessage": { "type": "string", "maxLength": 300 },
         "updatedByUid": {
           "type": "string",
           "minLength": 1,
@@ -470,9 +489,10 @@
         "facilitatorName": { "type": "string", "maxLength": 200 },
         "sessionTopic": { "type": "string", "maxLength": 200 },
         "ratings": { "type": "array", "maxItems": 12 },
-        "averageRating": { "type": "number", "minimum": 1, "maximum": 5 },
+        "averageRating": { "type": "number", "minimum": 0, "maximum": 5 },
         "selectedStatements": { "type": "array", "maxItems": 40 },
         "writtenComment": { "type": "string", "maxLength": 1500 },
+        "customAnswers": { "type": "array", "maxItems": 6 },
         "participantName": { "type": "string", "maxLength": 100 },
         "participantDepartment": { "type": "string", "maxLength": 100 },
         "participantEmail": { "type": "string", "maxLength": 128 },

@@ -76,6 +76,17 @@ export function exportFeedbackCsv(
     }
   }
 
+  const customPrompts: string[] = [];
+  const seenPrompts = new Set<string>();
+  for (const sub of submissions) {
+    for (const ans of sub.customAnswers ?? []) {
+      if (ans.prompt && !seenPrompts.has(ans.prompt)) {
+        seenPrompts.add(ans.prompt);
+        customPrompts.push(ans.prompt);
+      }
+    }
+  }
+
   const headers = [
     'Event Title',
     'Event Date',
@@ -90,6 +101,7 @@ export function exportFeedbackCsv(
     'Positive Feedback Selected',
     'Improvement Suggestions Selected',
     'Written Comments & Recommendations',
+    ...customPrompts.map((p) => `Question: ${p}`),
     'Submitted At (ISO)',
   ];
 
@@ -98,6 +110,9 @@ export function exportFeedbackCsv(
       ? sub.serverTimestamp.toDate().toISOString()
       : '';
     const ratingMap = new Map(sub.ratings.map((r) => [r.label, r.score]));
+    const customAnswerMap = new Map(
+      (sub.customAnswers ?? []).map((a) => [a.prompt, a.answer])
+    );
     const positiveTexts = sub.selectedStatements
       .filter((s) => s.sentiment === 'positive')
       .map((s) => s.text)
@@ -124,6 +139,7 @@ export function exportFeedbackCsv(
       escapeCsvCell(positiveTexts),
       escapeCsvCell(improvementTexts),
       escapeCsvCell(sub.writtenComment || ''),
+      ...customPrompts.map((p) => escapeCsvCell(customAnswerMap.get(p) || '')),
       escapeCsvCell(serverIso),
     ].join(',');
   });

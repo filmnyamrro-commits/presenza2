@@ -65,6 +65,18 @@ export interface CheckInReceipt {
 export interface OrganizationBranding {
   organizationName: string;
   logoDataUrl: string;
+  publicAppUrl?: string;
+}
+
+export interface DiagnosticErrorDetails {
+  title: string;
+  message: string;
+  failingUrl: string;
+  httpStatus?: number | null;
+  firebaseCode?: string;
+  firebaseMessage?: string;
+  consoleError?: string;
+  component: string;
 }
 
 export interface AuthorizedAdminRecord {
@@ -142,13 +154,39 @@ export interface FeedbackStatement {
   required: boolean;
 }
 
+export interface FeedbackCustomQuestion {
+  id: string;
+  prompt: string;
+  placeholder: string;
+  active: boolean;
+  required: boolean;
+}
+
+export interface FeedbackCustomAnswer {
+  questionId: string;
+  prompt: string;
+  answer: string;
+}
+
 export interface FeedbackConfig {
   eventId: string; // 'default' or specific event ID
+  formHeading: string;
   introNote: string;
+  ratingSectionTitle: string;
+  ratingSectionSubtitle: string;
+  checklistSectionTitle: string;
+  checklistSectionSubtitle: string;
+  commentQuestionLabel: string;
+  commentPlaceholder: string;
   requireWrittenComment: boolean;
   ratingCriteria: FeedbackRatingCriterion[];
   categories: FeedbackStatementCategory[];
   statements: FeedbackStatement[];
+  customQuestions: FeedbackCustomQuestion[];
+  scheduleEnabled: boolean;
+  openAtIso: string;
+  closeAtIso: string;
+  scheduleClosedMessage: string;
 }
 
 export interface FeedbackRatingEntry {
@@ -177,6 +215,7 @@ export interface FeedbackSubmissionRecord {
   averageRating: number;
   selectedStatements: FeedbackStatementSelection[];
   writtenComment: string;
+  customAnswers?: FeedbackCustomAnswer[];
   participantName?: string;
   participantDepartment?: string;
   participantEmail?: string;
@@ -315,34 +354,6 @@ export interface LiveBoardSettings {
   displayMode: LiveBoardDisplayMode;
   rotationIntervalSec: number;
   disableAnimations: boolean;
-}
-
-// Module 5: Cross-Device Owner Verification & Device Authorization
-export interface AuthorizedDeviceRecord {
-  deviceId: string;
-  deviceName: string;
-  userAgentSummary: string;
-  status: 'active' | 'revoked';
-  authorizedBy: 'code' | 'owner-google' | 'owner-direct';
-  authorizedAtIso: string;
-  lastSeenAtIso: string;
-  revokedAtIso?: string;
-}
-
-export interface PendingDeviceChallengeSummary {
-  challengeId: string;
-  deviceId: string;
-  deviceName: string;
-  userAgentSummary: string;
-  expiresAtIso: string;
-  createdAtIso: string;
-  attempts: number;
-  maxAttempts: number;
-  emailSent: boolean;
-}
-
-export interface DeviceSecurityPolicy {
-  allowDirectQrWithoutDeviceAuth: boolean;
 }
 
 export enum OperationType {

@@ -1,8 +1,10 @@
 import {
   AlertCircle,
   Calendar,
+  CalendarClock,
   CheckCircle2,
   CheckSquare,
+  Clock,
   Loader2,
   MapPin,
   MessageSquare,
@@ -25,16 +27,30 @@ import {
   where,
 } from 'firebase/firestore';
 import { useEffect, useMemo, useState } from 'react';
-import { db, handleFirestoreError, normalizeAdminEmail } from '../firebase';
 import {
+  db,
+  extractFirebaseErrorDetails,
+  normalizeAdminEmail,
+  reportFirestoreError,
+} from '../firebase';
+import {
+  type DiagnosticErrorDetails,
   type EventRecord,
   type FeedbackConfig,
+  type FeedbackCustomAnswer,
   type FeedbackRatingEntry,
   type FeedbackStatementSelection,
   OperationType,
 } from '../types';
 import { formatLocalDateYmd, generateSafeId } from '../utils/dateTime';
-import { mergeFeedbackConfig } from '../utils/feedbackAndRecognitionDefaults';
+import {
+  evaluateFeedbackSchedule,
+  formatScheduleCountdown,
+  formatScheduleDateTime,
+  mergeFeedbackConfig,
+} from '../utils/feedbackAndRecognitionDefaults';
+import { isValidEventIdParam } from '../utils/qrUrl';
+import DiagnosticErrorPanel from './DiagnosticErrorPanel';
 
 interface ParticipantFeedbackProps {
   requestedEventId: string | null;
@@ -101,11 +117,14 @@ export default function ParticipantFeedback({
   const [selectedEvent, setSelectedEvent] = useState<EventRecord | null>(null);
   const [loadingEvents, setLoadingEvents] = useState(true);
   const [eventError, setEventError] = useState<string | null>(null);
+  const [eventDiagnostic, setEventDiagnostic] =
+    useState<DiagnosticErrorDetails | null>(null);
 
   const [feedbackConfig, setFeedbackConfig] = useState<FeedbackConfig>(() =>
     mergeFeedbackConfig(null, 'default')
   );
   const [loadingConfig, setLoadingConfig] = useState(false);
+  const [nowMs, setNowMs] = useState<number>(() => Date.now());
 
   // Interactive Form State
   const [ratingsMap, setRatingsMap] = useState<Record<string, number>>({});
@@ -113,6 +132,9 @@ export default function ParticipantFeedback({
     () => new Set()
   );
   const [writtenComment, setWrittenComment] = useState('');
+  const [customAnswersMap, setCustomAnswersMap] = useState<
+    Record<string, string>
+  >({});
   const [participantName, setParticipantName] = useState('');
   const [participantDepartment, setParticipantDepartment] = useState('');
   const [linkedAttendanceId, setLinkedAttendanceId] = useState('');
@@ -147,7 +169,19 @@ export default function ParticipantFeedback({
       },
       (error) => {
         setLoadingEvents(false);
-        handleFirestoreError(error, OperationType.LIST, 'events');
+        const info = reportFirestoreError(error, OperationType.LIST, 'events');
+        setEventError(
+          `Unable to load active feedback sessions (${info.code || 'firestore-error'}).`
+        );
+        setEventDiagnostic({
+          title: 'Active Sessions Listener Failed',
+          message: info.error,
+          failingUrl: window.location.href,
+          firebaseCode: info.code || undefined,
+          firebaseMessage: info.error,
+          consoleError: `Firestore LIST events failed: ${info.error}`,
+          component: 'ParticipantFeedback.subscribeActiveEvents',
+        });
       }
     );
 
@@ -160,7 +194,23 @@ export default function ParticipantFeedback({
 
     async function resolveEvent() {
       setEventError(null);
+      setEventDiagnostic(null);
       if (requestedEventId) {
+        if (!isValidEventIdParam(requestedEventId)) {
+          setSelectedEvent(null);
+          setEventError(
+            `Invalid event identifier in feedback QR link ("${requestedEventId}").`
+          );
+          setEventDiagnostic({
+            title: 'Invalid Feedback QR Event Parameter',
+            message: 'The event query parameter contains unsupported characters or length.',
+            failingUrl: window.location.href,
+            consoleError: `Invalid event ID format: "${requestedEventId}"`,
+            component: 'ParticipantFeedback.resolveEvent',
+          });
+          return;
+        }
+
         const match = activeEvents.find((ev) => ev.id === requestedEventId);
         if (match) {
           setSelectedEvent(match);
@@ -172,25 +222,53 @@ export default function ParticipantFeedback({
           if (!snap.exists()) {
             setSelectedEvent(null);
             setEventError(
-              'This feedback QR session was not found. Select an active session below if available.'
+              `This feedback QR session (${requestedEventId}) was not found.`
             );
+            setEventDiagnostic({
+              title: 'Event Not Found',
+              message: `No event document exists at events/${requestedEventId}.`,
+              failingUrl: window.location.href,
+              firebaseCode: 'not-found',
+              firebaseMessage: `Document events/${requestedEventId} does not exist.`,
+              component: 'ParticipantFeedback.resolveEvent',
+            });
           } else {
             const data = snap.data() as Omit<EventRecord, 'id'>;
             if (data.status !== 'active') {
               setSelectedEvent(null);
               setEventError(
-                'Feedback submissions for this session have been closed by the organizer.'
+                `Feedback submissions for "${data.title}" (${data.eventDate}) have been closed by the organizer.`
               );
+              setEventDiagnostic({
+                title: 'Session Closed',
+                message: `Event "${data.title}" exists, but status is "${data.status}".`,
+                failingUrl: window.location.href,
+                component: 'ParticipantFeedback.resolveEvent',
+              });
             } else {
               setSelectedEvent({ id: snap.id, ...data });
             }
           }
-        } catch {
+        } catch (err) {
           if (!cancelled) {
+            const info = reportFirestoreError(
+              err,
+              OperationType.GET,
+              `events/${requestedEventId}`
+            );
             setSelectedEvent(null);
             setEventError(
-              'Unable to load this feedback session or submissions are currently closed.'
+              `Unable to load feedback session "${requestedEventId}" (${info.code || 'firestore-error'}).`
             );
+            setEventDiagnostic({
+              title: 'Session Lookup Failed',
+              message: info.error,
+              failingUrl: window.location.href,
+              firebaseCode: info.code || undefined,
+              firebaseMessage: info.error,
+              consoleError: `Firestore GET events/${requestedEventId}: ${info.error}`,
+              component: 'ParticipantFeedback.resolveEvent',
+            });
           }
         }
       } else {
@@ -207,85 +285,102 @@ export default function ParticipantFeedback({
     };
   }, [requestedEventId, activeEvents, loadingEvents]);
 
-  // Load feedback form configuration (per-event override -> default -> built-in defaults) + check-in hint / duplicate receipt
+  // Live-subscribe to feedback form configuration (per-event override -> default -> built-in defaults) + check-in hint / duplicate receipt
   useEffect(() => {
-    let active = true;
-
-    async function loadConfigAndContext() {
-      if (!selectedEvent) {
-        setFeedbackConfig(mergeFeedbackConfig(null, 'default'));
-        setSubmittedReceipt(null);
-        return;
-      }
-
-      setLoadingConfig(true);
-      setFormError(null);
-      setRatingsMap({});
-      setSelectedStatementIds(new Set());
-      setWrittenComment('');
-
-      // Check local device duplicate submission lock
-      const priorReceipt = readFeedbackReceipt(selectedEvent.id);
-      if (active) {
-        setSubmittedReceipt(priorReceipt);
-      }
-
-      // Auto-associate participant identification from device check-in receipt if available
-      const checkInHint = readCheckInHint(selectedEvent.id);
-      if (active) {
-        setParticipantName(
-          checkInHint?.fullName || user?.displayName?.trim() || ''
-        );
-        setParticipantDepartment(checkInHint?.classDepartment || '');
-        setLinkedAttendanceId(checkInHint?.attendanceId || '');
-      }
-
-      try {
-        const eventCfgSnap = await getDoc(
-          doc(db, 'feedbackConfigs', selectedEvent.id)
-        );
-        if (!active) return;
-        if (eventCfgSnap.exists()) {
-          setFeedbackConfig(
-            mergeFeedbackConfig(
-              eventCfgSnap.data() as Partial<FeedbackConfig>,
-              selectedEvent.id
-            )
-          );
-          setLoadingConfig(false);
-          return;
-        }
-
-        const defaultCfgSnap = await getDoc(
-          doc(db, 'feedbackConfigs', 'default')
-        );
-        if (!active) return;
-        if (defaultCfgSnap.exists()) {
-          setFeedbackConfig(
-            mergeFeedbackConfig(
-              defaultCfgSnap.data() as Partial<FeedbackConfig>,
-              selectedEvent.id
-            )
-          );
-        } else {
-          setFeedbackConfig(mergeFeedbackConfig(null, selectedEvent.id));
-        }
-      } catch {
-        if (active) {
-          setFeedbackConfig(mergeFeedbackConfig(null, selectedEvent.id));
-        }
-      } finally {
-        if (active) {
-          setLoadingConfig(false);
-        }
-      }
+    if (!selectedEvent) {
+      setFeedbackConfig(mergeFeedbackConfig(null, 'default'));
+      setSubmittedReceipt(null);
+      return;
     }
 
-    void loadConfigAndContext();
+    const eventId = selectedEvent.id;
+    setLoadingConfig(true);
+    setFormError(null);
+    setRatingsMap({});
+    setSelectedStatementIds(new Set());
+    setWrittenComment('');
+    setCustomAnswersMap({});
+
+    const priorReceipt = readFeedbackReceipt(eventId);
+    setSubmittedReceipt(priorReceipt);
+
+    const checkInHint = readCheckInHint(eventId);
+    setParticipantName(
+      checkInHint?.fullName || user?.displayName?.trim() || ''
+    );
+    setParticipantDepartment(checkInHint?.classDepartment || '');
+    setLinkedAttendanceId(checkInHint?.attendanceId || '');
+
+    let eventCfgData: Partial<FeedbackConfig> | null | undefined = undefined;
+    let defaultCfgData: Partial<FeedbackConfig> | null | undefined = undefined;
+
+    const applyLatestConfig = () => {
+      if (eventCfgData === undefined && defaultCfgData === undefined) return;
+      const chosen = eventCfgData ?? defaultCfgData ?? null;
+      setFeedbackConfig(mergeFeedbackConfig(chosen, eventId));
+      if (eventCfgData !== undefined && (eventCfgData !== null || defaultCfgData !== undefined)) {
+        setLoadingConfig(false);
+      }
+    };
+
+    const unsubEventCfg = onSnapshot(
+      doc(db, 'feedbackConfigs', eventId),
+      (snap) => {
+        eventCfgData = snap.exists()
+          ? (snap.data() as Partial<FeedbackConfig>)
+          : null;
+        applyLatestConfig();
+      },
+      (error) => {
+        reportFirestoreError(
+          error,
+          OperationType.GET,
+          `feedbackConfigs/${eventId}`
+        );
+        eventCfgData = null;
+        applyLatestConfig();
+      }
+    );
+
+    const unsubDefaultCfg = onSnapshot(
+      doc(db, 'feedbackConfigs', 'default'),
+      (snap) => {
+        defaultCfgData = snap.exists()
+          ? (snap.data() as Partial<FeedbackConfig>)
+          : null;
+        applyLatestConfig();
+      },
+      (error) => {
+        reportFirestoreError(
+          error,
+          OperationType.GET,
+          'feedbackConfigs/default'
+        );
+        defaultCfgData = null;
+        applyLatestConfig();
+      }
+    );
+
     return () => {
-      active = false;
+      unsubEventCfg();
+      unsubDefaultCfg();
     };
   }, [selectedEvent?.id, user?.displayName]);
+
+  // Live 1s clock while a feedback schedule window is active
+  useEffect(() => {
+    if (!feedbackConfig.scheduleEnabled) return;
+    setNowMs(Date.now());
+    const timer = window.setInterval(() => {
+      setNowMs(Date.now());
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [feedbackConfig.scheduleEnabled]);
+
+  const scheduleEvaluation = useMemo(
+    () => evaluateFeedbackSchedule(feedbackConfig, nowMs),
+    [feedbackConfig, nowMs]
+  );
 
   const activeCriteria = useMemo(
     () => feedbackConfig.ratingCriteria.filter((c) => c.active),
@@ -301,6 +396,11 @@ export default function ParticipantFeedback({
       }))
       .filter((group) => group.statements.length > 0);
   }, [feedbackConfig.categories, feedbackConfig.statements]);
+
+  const activeCustomQuestions = useMemo(
+    () => feedbackConfig.customQuestions.filter((q) => q.active && q.prompt.trim()),
+    [feedbackConfig.customQuestions]
+  );
 
   const ratedScores = useMemo(() => {
     const entries = activeCriteria
@@ -331,6 +431,16 @@ export default function ParticipantFeedback({
     if (!selectedEvent || submitting || submittedReceipt) return;
     setFormError(null);
 
+    const liveSchedule = evaluateFeedbackSchedule(feedbackConfig, Date.now());
+    if (!liveSchedule.isOpen) {
+      setFormError(
+        liveSchedule.status === 'before-open'
+          ? 'Feedback submissions are not open yet for this scheduled window.'
+          : 'The scheduled window for submitting feedback has closed.'
+      );
+      return;
+    }
+
     // 1. Validate mandatory rating criteria
     const missingCriteria = activeCriteria.filter(
       (c) => c.required && !(ratingsMap[c.id] >= 1 && ratingsMap[c.id] <= 5)
@@ -353,7 +463,18 @@ export default function ParticipantFeedback({
       return;
     }
 
-    // 3. Validate written comment if mandatory
+    // 3. Validate mandatory custom open-ended questions
+    const missingCustomQuestion = activeCustomQuestions.find(
+      (q) => q.required && (customAnswersMap[q.id] || '').trim().length < 2
+    );
+    if (missingCustomQuestion) {
+      setFormError(
+        `Please answer the required question: "${missingCustomQuestion.prompt}"`
+      );
+      return;
+    }
+
+    // 4. Validate written comment if mandatory
     const cleanComment = writtenComment.trim().slice(0, 1500);
     if (feedbackConfig.requireWrittenComment && cleanComment.length < 3) {
       setFormError(
@@ -371,9 +492,22 @@ export default function ParticipantFeedback({
         score: ratingsMap[c.id],
       }));
 
-    if (ratingEntries.length === 0 && selectedStatementIds.size === 0 && !cleanComment) {
+    const customAnswerEntries: FeedbackCustomAnswer[] = activeCustomQuestions
+      .map((q) => ({
+        questionId: q.id.slice(0, 80),
+        prompt: q.prompt.slice(0, 200),
+        answer: (customAnswersMap[q.id] || '').trim().slice(0, 1000),
+      }))
+      .filter((a) => a.answer.length > 0);
+
+    if (
+      ratingEntries.length === 0 &&
+      selectedStatementIds.size === 0 &&
+      !cleanComment &&
+      customAnswerEntries.length === 0
+    ) {
       setFormError(
-        'Please provide at least one star rating, checklist selection, or written comment before submitting.'
+        'Please provide at least one star rating, checklist selection, or written answer before submitting.'
       );
       return;
     }
@@ -432,6 +566,9 @@ export default function ParticipantFeedback({
       clientSubmissionToken: clientToken,
       serverTimestamp: serverTimestamp(),
     };
+    if (customAnswerEntries.length > 0) {
+      payload.customAnswers = customAnswerEntries;
+    }
 
     const cleanName = participantName.trim().slice(0, 100);
     const cleanDept = participantDepartment.trim().slice(0, 100);
@@ -472,24 +609,21 @@ export default function ParticipantFeedback({
       }
       setSubmittedReceipt(receipt);
     } catch (error) {
-      const msg = error instanceof Error ? error.message : String(error);
-      if (msg.toLowerCase().includes('permission')) {
+      const { code, message } = extractFirebaseErrorDetails(error);
+      reportFirestoreError(
+        error,
+        OperationType.CREATE,
+        `feedbackSubmissions/${submissionId}`
+      );
+      if (
+        code.includes('permission-denied') ||
+        message.toLowerCase().includes('permission')
+      ) {
         setFormError(
           'Unable to submit feedback. This session may have been closed by the organizer.'
         );
       } else {
-        setFormError(
-          'Network error while saving feedback. Please try again.'
-        );
-      }
-      try {
-        handleFirestoreError(
-          error,
-          OperationType.CREATE,
-          `feedbackSubmissions/${submissionId}`
-        );
-      } catch {
-        // Logged for diagnostics; friendly error shown above
+        setFormError(`Unable to save feedback (${code || 'network-error'}): ${message}`);
       }
     } finally {
       setSubmitting(false);
@@ -571,20 +705,25 @@ export default function ParticipantFeedback({
       {eventError && (
         <div
           role="alert"
-          className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-sm text-amber-900"
+          className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3.5 text-sm text-amber-900 space-y-2"
         >
-          <div className="flex items-start gap-2.5">
-            <AlertCircle className="w-5 h-5 text-amber-700 shrink-0 mt-0.5" />
-            <span>{eventError}</span>
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="flex items-start gap-2.5">
+              <AlertCircle className="w-5 h-5 text-amber-700 shrink-0 mt-0.5" />
+              <span>{eventError}</span>
+            </div>
+            {activeEvents.length > 0 && (
+              <button
+                type="button"
+                onClick={() => onSelectEventId(activeEvents[0].id)}
+                className="min-h-[38px] px-3.5 py-1.5 rounded-lg bg-amber-900 text-white text-xs font-semibold hover:bg-amber-800 whitespace-nowrap shrink-0"
+              >
+                Switch to Active Session
+              </button>
+            )}
           </div>
-          {activeEvents.length > 0 && (
-            <button
-              type="button"
-              onClick={() => onSelectEventId(activeEvents[0].id)}
-              className="min-h-[38px] px-3.5 py-1.5 rounded-lg bg-amber-900 text-white text-xs font-semibold hover:bg-amber-800 whitespace-nowrap shrink-0"
-            >
-              Switch to Active Session
-            </button>
+          {eventDiagnostic && (
+            <DiagnosticErrorPanel diagnostic={eventDiagnostic} />
           )}
         </div>
       )}
@@ -617,7 +756,7 @@ export default function ParticipantFeedback({
           <aside className="lg:col-span-4 bg-white border border-slate-200 rounded-2xl p-6 space-y-5 lg:sticky lg:top-24">
             <div>
               <div className="flex items-center justify-between gap-2 text-xs font-bold uppercase tracking-wider text-blue-700">
-                <span>Feedback &amp; Evaluation</span>
+                <span>{feedbackConfig.formHeading || 'Feedback & Evaluation'}</span>
                 <span>No Login Required</span>
               </div>
               <h1 className="mt-2 text-xl sm:text-2xl font-bold text-slate-900 tracking-tight">
@@ -704,12 +843,121 @@ export default function ParticipantFeedback({
             )}
           </aside>
 
-          {/* Right Form Sections */}
+          {/* Right Form Sections or Scheduled Time Gate */}
+          {!scheduleEvaluation.isOpen ? (
+            <div className="lg:col-span-8 bg-white border border-slate-200 rounded-2xl p-6 sm:p-8 space-y-5">
+              <div className="flex items-start gap-3.5">
+                <div
+                  className={`w-12 h-12 rounded-2xl flex items-center justify-center shrink-0 ${
+                    scheduleEvaluation.status === 'before-open'
+                      ? 'bg-amber-100 text-amber-700'
+                      : 'bg-rose-100 text-rose-700'
+                  }`}
+                >
+                  <CalendarClock className="w-6 h-6" />
+                </div>
+                <div className="space-y-1">
+                  <span
+                    className={`inline-block text-[11px] font-bold uppercase tracking-wider px-2.5 py-0.5 rounded-md ${
+                      scheduleEvaluation.status === 'before-open'
+                        ? 'bg-amber-100 text-amber-800'
+                        : 'bg-rose-100 text-rose-800'
+                    }`}
+                  >
+                    {scheduleEvaluation.status === 'before-open'
+                      ? 'Feedback Opens Soon'
+                      : 'Feedback Window Closed'}
+                  </span>
+                  <h2 className="text-xl font-bold text-slate-900">
+                    {scheduleEvaluation.status === 'before-open'
+                      ? 'Feedback & Evaluation Is Not Open Yet'
+                      : 'Feedback & Evaluation Window Has Ended'}
+                  </h2>
+                  <p className="text-sm text-slate-600 leading-relaxed">
+                    {feedbackConfig.scheduleClosedMessage.trim()
+                      ? feedbackConfig.scheduleClosedMessage
+                      : scheduleEvaluation.status === 'before-open'
+                      ? 'The organizer has scheduled a specific time window for submitting evaluations. This page will unlock automatically once the opening time is reached.'
+                      : 'The scheduled time window for filling in feedback and evaluations for this session has passed.'}
+                  </p>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2">
+                {scheduleEvaluation.openAtDate && (
+                  <div className="rounded-xl border border-slate-200 bg-slate-50 p-3.5">
+                    <div className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">
+                      Opens At
+                    </div>
+                    <div className="mt-1 text-sm font-bold font-mono-tabular text-slate-900">
+                      {formatScheduleDateTime(scheduleEvaluation.openAtDate)}
+                    </div>
+                  </div>
+                )}
+                {scheduleEvaluation.closeAtDate && (
+                  <div className="rounded-xl border border-slate-200 bg-slate-50 p-3.5">
+                    <div className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">
+                      Closes At
+                    </div>
+                    <div className="mt-1 text-sm font-bold font-mono-tabular text-slate-900">
+                      {formatScheduleDateTime(scheduleEvaluation.closeAtDate)}
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {scheduleEvaluation.status === 'before-open' &&
+                scheduleEvaluation.openAtMs !== null && (
+                  <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 flex items-center justify-between gap-3">
+                    <span className="text-xs font-semibold text-amber-900 inline-flex items-center gap-2">
+                      <Clock className="w-4 h-4 text-amber-700" />
+                      <span>Time remaining until feedback opens</span>
+                    </span>
+                    <span className="font-mono-tabular text-sm font-bold text-amber-900">
+                      {formatScheduleCountdown(
+                        scheduleEvaluation.openAtMs - nowMs
+                      )}
+                    </span>
+                  </div>
+                )}
+
+              {onGoToCheckIn && (
+                <div className="pt-2">
+                  <button
+                    type="button"
+                    onClick={() => onGoToCheckIn(selectedEvent.id)}
+                    className="min-h-[42px] px-4 py-2 rounded-xl border border-slate-300 bg-white hover:bg-slate-100 text-xs font-semibold text-slate-800 transition-colors"
+                  >
+                    Back to Event Check-In
+                  </button>
+                </div>
+              )}
+            </div>
+          ) : (
           <form
             onSubmit={handleSubmit}
             noValidate
             className="lg:col-span-8 bg-white border border-slate-200 rounded-2xl p-6 sm:p-8 space-y-8"
           >
+            {feedbackConfig.scheduleEnabled && (
+              <div className="rounded-xl border border-emerald-200 bg-emerald-50/70 px-4 py-2.5 flex flex-wrap items-center justify-between gap-2 text-xs text-emerald-900">
+                <span className="font-semibold inline-flex items-center gap-1.5">
+                  <Clock className="w-3.5 h-3.5 text-emerald-700" />
+                  <span>Evaluation window is open now</span>
+                </span>
+                {scheduleEvaluation.closeAtMs !== null &&
+                  scheduleEvaluation.closeAtDate && (
+                    <span className="font-mono-tabular font-semibold">
+                      Closes {formatScheduleDateTime(scheduleEvaluation.closeAtDate)} (
+                      {formatScheduleCountdown(
+                        scheduleEvaluation.closeAtMs - nowMs
+                      )}{' '}
+                      left)
+                    </span>
+                  )}
+              </div>
+            )}
+
             {loadingConfig && (
               <div className="flex items-center gap-2 text-xs text-slate-500">
                 <Loader2 className="w-4 h-4 animate-spin text-blue-700" />
@@ -721,11 +969,13 @@ export default function ParticipantFeedback({
             <section className="space-y-4">
               <div>
                 <h2 className="text-lg font-bold text-slate-900">
-                  1. Satisfaction Rating (1–5 Stars)
+                  {feedbackConfig.ratingSectionTitle}
                 </h2>
-                <p className="text-xs text-slate-500 mt-0.5">
-                  Tap a star from 1 (Needs improvement) to 5 (Excellent) for each area.
-                </p>
+                {feedbackConfig.ratingSectionSubtitle && (
+                  <p className="text-xs text-slate-500 mt-0.5">
+                    {feedbackConfig.ratingSectionSubtitle}
+                  </p>
+                )}
               </div>
 
               <div className="space-y-3">
@@ -796,11 +1046,13 @@ export default function ParticipantFeedback({
               <section className="pt-6 border-t border-slate-200 space-y-4">
                 <div>
                   <h2 className="text-lg font-bold text-slate-900">
-                    2. Quick Feedback Checklist
+                    {feedbackConfig.checklistSectionTitle}
                   </h2>
-                  <p className="text-xs text-slate-500 mt-0.5">
-                    Tick all statements that match your experience in this session.
-                  </p>
+                  {feedbackConfig.checklistSectionSubtitle && (
+                    <p className="text-xs text-slate-500 mt-0.5">
+                      {feedbackConfig.checklistSectionSubtitle}
+                    </p>
+                  )}
                 </div>
 
                 <div className="space-y-5">
@@ -861,6 +1113,49 @@ export default function ParticipantFeedback({
               </section>
             )}
 
+            {/* Additional Custom Open-Ended Questions */}
+            {activeCustomQuestions.length > 0 && (
+              <section className="pt-6 border-t border-slate-200 space-y-4">
+                {activeCustomQuestions.map((q) => {
+                  const val = customAnswersMap[q.id] || '';
+                  return (
+                    <div key={q.id} className="space-y-1.5">
+                      <div className="flex items-center justify-between gap-2">
+                        <label
+                          htmlFor={`custom-q-${q.id}`}
+                          className="text-sm font-bold text-slate-900"
+                        >
+                          {q.prompt}{' '}
+                          {q.required && (
+                            <span className="text-rose-600">*</span>
+                          )}
+                        </label>
+                        <span className="text-[11px] font-mono-tabular text-slate-400">
+                          {val.length}/1000
+                        </span>
+                      </div>
+                      <textarea
+                        id={`custom-q-${q.id}`}
+                        rows={2}
+                        maxLength={1000}
+                        value={val}
+                        onChange={(e) =>
+                          setCustomAnswersMap((prev) => ({
+                            ...prev,
+                            [q.id]: e.target.value,
+                          }))
+                        }
+                        placeholder={
+                          q.placeholder || 'Write your response here...'
+                        }
+                        className="w-full px-3.5 py-2.5 text-sm bg-white border border-slate-300 rounded-xl text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-600"
+                      />
+                    </div>
+                  );
+                })}
+              </section>
+            )}
+
             {/* Section 4: Written Comments */}
             <section className="pt-6 border-t border-slate-200 space-y-3">
               <div className="flex items-center justify-between gap-2">
@@ -870,7 +1165,7 @@ export default function ParticipantFeedback({
                 >
                   <MessageSquare className="w-4 h-4 text-blue-700" />
                   <span>
-                    3. Written Comments{' '}
+                    {feedbackConfig.commentQuestionLabel}{' '}
                     {feedbackConfig.requireWrittenComment && (
                       <span className="text-rose-600">*</span>
                     )}
@@ -886,7 +1181,10 @@ export default function ParticipantFeedback({
                 maxLength={1500}
                 value={writtenComment}
                 onChange={(e) => setWrittenComment(e.target.value)}
-                placeholder="Please share your comments, suggestions, or recommendations."
+                placeholder={
+                  feedbackConfig.commentPlaceholder ||
+                  'Please share your comments, suggestions, or recommendations.'
+                }
                 className="w-full px-4 py-3 text-sm bg-white border border-slate-300 rounded-xl text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-600"
               />
             </section>
@@ -955,6 +1253,7 @@ export default function ParticipantFeedback({
               </button>
             </div>
           </form>
+          )}
         </div>
       )}
     </div>

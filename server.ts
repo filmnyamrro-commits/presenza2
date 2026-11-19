@@ -4,7 +4,6 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { GoogleGenAI } from '@google/genai';
-import { registerDeviceAuthRoutes } from './server/deviceAuth.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -66,6 +65,22 @@ async function startServer() {
   const app = express();
   app.use(express.json({ limit: '64kb' }));
 
+  app.use((_req, res, next) => {
+    res.setHeader('Permissions-Policy', 'camera=(self), microphone=()');
+    next();
+  });
+
+  app.use('/api', (req, res, next) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    if (req.method === 'OPTIONS') {
+      res.status(204).end();
+      return;
+    }
+    next();
+  });
+
   app.get('/api/health', (_req, res) => {
     const apiKey = (process.env.GEMINI_API_KEY || '').trim();
     res.json({
@@ -74,7 +89,108 @@ async function startServer() {
     });
   });
 
-  registerDeviceAuthRoutes(app);
+  app.get('/api/public/config', (_req, res) => {
+    const candidate = (
+      process.env.VITE_PUBLIC_APP_URL ||
+      process.env.PUBLIC_APP_URL ||
+      ''
+    ).trim();
+    const isSafePublic =
+      candidate.startsWith('https://') &&
+      !candidate.includes('ais-dev-') &&
+      !candidate.includes('localhost') &&
+      !candidate.includes('127.0.0.1');
+    res.json({
+      ok: true,
+      publicAppUrl: isSafePublic ? candidate : '',
+    });
+  });
+
+  // Public check-in rate-limiting & accidental duplicate burst guard (no auth required)
+  const checkinRateWindowMs = 5 * 60 * 1000;
+  const checkinMaxPerIpWindow = 30;
+  const checkinDuplicateWindowMs = 90 * 1000;
+  const ipCheckinHistory = new Map<string, number[]>();
+  const recentCheckinFingerprints = new Map<string, number>();
+
+  app.post('/api/public/checkin-guard', (req, res) => {
+    const body = (req.body ?? {}) as {
+      eventId?: unknown;
+      fullName?: unknown;
+      classDepartment?: unknown;
+    };
+    const eventId = typeof body.eventId === 'string' ? body.eventId.trim() : '';
+    const fullName =
+      typeof body.fullName === 'string'
+        ? body.fullName.trim().toLowerCase().replace(/\s+/g, ' ')
+        : '';
+    const classDept =
+      typeof body.classDepartment === 'string'
+        ? body.classDepartment.trim().toLowerCase().replace(/\s+/g, ' ')
+        : '';
+
+    if (
+      !/^[a-zA-Z0-9_\-]{1,128}$/.test(eventId) ||
+      fullName.length < 2 ||
+      fullName.length > 100 ||
+      classDept.length < 1 ||
+      classDept.length > 100
+    ) {
+      res.status(400).json({
+        allowed: false,
+        error: 'Please enter a valid full name and class/department.',
+      });
+      return;
+    }
+
+    const now = Date.now();
+    const xff = req.headers['x-forwarded-for'];
+    const rawIp = Array.isArray(xff)
+      ? xff[0]
+      : typeof xff === 'string'
+      ? xff.split(',')[0]
+      : req.ip;
+    const ipKey = String(rawIp || 'unknown').trim().slice(0, 64);
+
+    // Prune and check IP rate limit
+    const recentIpTimes = (ipCheckinHistory.get(ipKey) ?? []).filter(
+      (ts) => now - ts < checkinRateWindowMs
+    );
+    if (recentIpTimes.length >= checkinMaxPerIpWindow) {
+      res.status(429).json({
+        allowed: false,
+        code: 'rate_limited',
+        error:
+          'Too many check-in submissions from this network in a short time. Please wait a minute and try again.',
+      });
+      return;
+    }
+
+    // Prune expired duplicate fingerprints periodically
+    for (const [fp, ts] of recentCheckinFingerprints.entries()) {
+      if (now - ts >= checkinDuplicateWindowMs) {
+        recentCheckinFingerprints.delete(fp);
+      }
+    }
+
+    const fingerprint = `${eventId}::${fullName}::${classDept}`;
+    const lastSubmittedAt = recentCheckinFingerprints.get(fingerprint);
+    if (lastSubmittedAt && now - lastSubmittedAt < checkinDuplicateWindowMs) {
+      res.status(409).json({
+        allowed: false,
+        code: 'duplicate_burst',
+        error:
+          'An attendance check-in with this name and class/department was just submitted for this session. Duplicate submission prevented.',
+      });
+      return;
+    }
+
+    recentIpTimes.push(now);
+    ipCheckinHistory.set(ipKey, recentIpTimes);
+    recentCheckinFingerprints.set(fingerprint, now);
+
+    res.json({ allowed: true });
+  });
 
   app.post('/api/tts', async (req, res) => {
     const body = (req.body ?? {}) as {
@@ -177,7 +293,7 @@ async function startServer() {
     });
   }
 
-  const port = Number(process.env.PORT) || 3000;
+  const port = 3000;
   app.listen(port, '0.0.0.0', () => {
     console.log(`PRESENZA server listening on http://0.0.0.0:${port}`);
   });

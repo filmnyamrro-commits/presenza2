@@ -181,11 +181,21 @@ service cloud.firestore {
         data.updatedAt is timestamp;
     }
 
+    function isValidOptionalPublicUrl(val) {
+      return val is string &&
+        val.size() <= 250 &&
+        (
+          val.size() == 0 ||
+          (val.size() >= 10 && val.matches('^https://[a-zA-Z0-9.\\-]+(:[0-9]{1,5})?$'))
+        );
+    }
+
     function isValidBranding(data) {
       return data.keys().hasAll(['organizationName', 'logoDataUrl', 'updatedByUid', 'updatedAt']) &&
-        data.keys().hasOnly(['organizationName', 'logoDataUrl', 'updatedByUid', 'updatedAt']) &&
+        data.keys().hasOnly(['organizationName', 'logoDataUrl', 'publicAppUrl', 'updatedByUid', 'updatedAt']) &&
         data.organizationName is string && data.organizationName.size() <= 120 &&
         isValidOptionalImage(data.logoDataUrl, 350000) &&
+        (!('publicAppUrl' in data) || isValidOptionalPublicUrl(data.publicAppUrl)) &&
         isValidId(data.updatedByUid) &&
         data.updatedAt is timestamp;
     }
@@ -245,12 +255,25 @@ service cloud.firestore {
           'updatedByUid', 'updatedAt'
         ]) &&
         data.keys().hasOnly([
-          'eventId', 'introNote', 'requireWrittenComment',
-          'ratingCriteria', 'categories', 'statements',
+          'eventId', 'formHeading', 'introNote',
+          'ratingSectionTitle', 'ratingSectionSubtitle',
+          'checklistSectionTitle', 'checklistSectionSubtitle',
+          'commentQuestionLabel', 'commentPlaceholder',
+          'requireWrittenComment', 'ratingCriteria', 'categories', 'statements',
+          'customQuestions',
+          'scheduleEnabled', 'openAtIso', 'closeAtIso',
+          'openTimestamp', 'closeTimestamp', 'scheduleClosedMessage',
           'updatedByUid', 'updatedAt'
         ]) &&
         isValidId(data.eventId) &&
+        (!('formHeading' in data) || (data.formHeading is string && data.formHeading.size() <= 120)) &&
         data.introNote is string && data.introNote.size() <= 400 &&
+        (!('ratingSectionTitle' in data) || (data.ratingSectionTitle is string && data.ratingSectionTitle.size() <= 140)) &&
+        (!('ratingSectionSubtitle' in data) || (data.ratingSectionSubtitle is string && data.ratingSectionSubtitle.size() <= 300)) &&
+        (!('checklistSectionTitle' in data) || (data.checklistSectionTitle is string && data.checklistSectionTitle.size() <= 140)) &&
+        (!('checklistSectionSubtitle' in data) || (data.checklistSectionSubtitle is string && data.checklistSectionSubtitle.size() <= 300)) &&
+        (!('commentQuestionLabel' in data) || (data.commentQuestionLabel is string && data.commentQuestionLabel.size() <= 160)) &&
+        (!('commentPlaceholder' in data) || (data.commentPlaceholder is string && data.commentPlaceholder.size() <= 240)) &&
         data.requireWrittenComment is bool &&
         data.ratingCriteria is list && data.ratingCriteria.size() >= 1 && data.ratingCriteria.size() <= 12 &&
         data.ratingCriteria[0] is map &&
@@ -258,8 +281,33 @@ service cloud.firestore {
         data.categories[0] is map &&
         data.statements is list && data.statements.size() <= 40 &&
         (data.statements.size() == 0 || data.statements[0] is map) &&
+        (!('customQuestions' in data) || (data.customQuestions is list && data.customQuestions.size() <= 6 && (data.customQuestions.size() == 0 || data.customQuestions[0] is map))) &&
+        (!('scheduleEnabled' in data) || data.scheduleEnabled is bool) &&
+        (!('openAtIso' in data) || (data.openAtIso is string && data.openAtIso.size() <= 40)) &&
+        (!('closeAtIso' in data) || (data.closeAtIso is string && data.closeAtIso.size() <= 40)) &&
+        (!('openTimestamp' in data) || data.openTimestamp is timestamp) &&
+        (!('closeTimestamp' in data) || data.closeTimestamp is timestamp) &&
+        (!('scheduleClosedMessage' in data) || (data.scheduleClosedMessage is string && data.scheduleClosedMessage.size() <= 300)) &&
         isValidId(data.updatedByUid) &&
         data.updatedAt is timestamp;
+    }
+
+    function isConfigScheduleCurrentlyOpen(cfg) {
+      return !('scheduleEnabled' in cfg) ||
+        cfg.scheduleEnabled != true ||
+        (
+          (!('openTimestamp' in cfg) || request.time >= cfg.openTimestamp) &&
+          (!('closeTimestamp' in cfg) || request.time <= cfg.closeTimestamp)
+        );
+    }
+
+    function isFeedbackWindowOpen(eventId) {
+      return exists(/databases/$(database)/documents/feedbackConfigs/$(eventId))
+        ? isConfigScheduleCurrentlyOpen(get(/databases/$(database)/documents/feedbackConfigs/$(eventId)).data)
+        : (
+            !exists(/databases/$(database)/documents/feedbackConfigs/default) ||
+            isConfigScheduleCurrentlyOpen(get(/databases/$(database)/documents/feedbackConfigs/default).data)
+          );
     }
 
     function isValidFeedbackSubmission(data) {
@@ -272,7 +320,7 @@ service cloud.firestore {
         data.keys().hasOnly([
           'eventId', 'eventTitle', 'eventDate', 'eventVenue',
           'facilitatorName', 'sessionTopic', 'ratings', 'averageRating',
-          'selectedStatements', 'writtenComment',
+          'selectedStatements', 'writtenComment', 'customAnswers',
           'participantName', 'participantDepartment', 'participantEmail', 'attendanceId',
           'clientSubmissionToken', 'serverTimestamp'
         ]) &&
@@ -288,6 +336,7 @@ service cloud.firestore {
         data.selectedStatements is list && data.selectedStatements.size() <= 40 &&
         (data.selectedStatements.size() == 0 || data.selectedStatements[0] is map) &&
         data.writtenComment is string && data.writtenComment.size() <= 1500 &&
+        (!('customAnswers' in data) || (data.customAnswers is list && data.customAnswers.size() <= 6 && (data.customAnswers.size() == 0 || data.customAnswers[0] is map))) &&
         (!('participantName' in data) || (data.participantName is string && data.participantName.size() <= 100)) &&
         (!('participantDepartment' in data) || (data.participantDepartment is string && data.participantDepartment.size() <= 100)) &&
         (!('participantEmail' in data) || data.participantEmail == '' || isValidEmail(data.participantEmail)) &&
@@ -479,7 +528,7 @@ service cloud.firestore {
     }
 
     match /events/{eventId} {
-      allow get: if isValidId(eventId) && (existing().status == 'active' || isAdmin());
+      allow get: if isValidId(eventId);
       allow list: if existing().status == 'active' || isAdmin();
       allow create: if isAdmin() &&
         isValidId(eventId) &&
@@ -512,20 +561,7 @@ service cloud.firestore {
         incoming().serverTimestamp == request.time &&
         exists(/databases/$(database)/documents/events/$(incoming().eventId)) &&
         get(/databases/$(database)/documents/events/$(incoming().eventId)).data.status == 'active' &&
-        incoming().eventName == get(/databases/$(database)/documents/events/$(incoming().eventId)).data.title &&
-        (
-          !('requireParticipantLogin' in get(/databases/$(database)/documents/events/$(incoming().eventId)).data) ||
-          get(/databases/$(database)/documents/events/$(incoming().eventId)).data.requireParticipantLogin == false ||
-          (
-            isSignedIn() &&
-            request.auth.token.email_verified == true &&
-            isValidEmail(userEmailLower()) &&
-            'participantEmail' in incoming() &&
-            incoming().participantEmail == userEmailLower() &&
-            'participantUid' in incoming() &&
-            incoming().participantUid == request.auth.uid
-          )
-        );
+        incoming().eventName == get(/databases/$(database)/documents/events/$(incoming().eventId)).data.title;
       allow update: if isAdmin() &&
         isValidId(attendanceId) &&
         isValidAttendance(incoming()) &&
@@ -601,7 +637,7 @@ service cloud.firestore {
         isValidBranding(incoming()) &&
         incoming().updatedByUid == request.auth.uid &&
         incoming().updatedAt == request.time &&
-        incoming().diff(existing()).affectedKeys().hasOnly(['organizationName', 'logoDataUrl', 'updatedByUid', 'updatedAt']);
+        incoming().diff(existing()).affectedKeys().hasOnly(['organizationName', 'logoDataUrl', 'publicAppUrl', 'updatedByUid', 'updatedAt']);
       allow delete: if isAdmin() && isValidId(brandingId);
     }
 
@@ -640,8 +676,14 @@ service cloud.firestore {
         incoming().updatedByUid == request.auth.uid &&
         incoming().updatedAt == request.time &&
         incoming().diff(existing()).affectedKeys().hasOnly([
-          'introNote', 'requireWrittenComment',
-          'ratingCriteria', 'categories', 'statements',
+          'formHeading', 'introNote',
+          'ratingSectionTitle', 'ratingSectionSubtitle',
+          'checklistSectionTitle', 'checklistSectionSubtitle',
+          'commentQuestionLabel', 'commentPlaceholder',
+          'requireWrittenComment', 'ratingCriteria', 'categories', 'statements',
+          'customQuestions',
+          'scheduleEnabled', 'openAtIso', 'closeAtIso',
+          'openTimestamp', 'closeTimestamp', 'scheduleClosedMessage',
           'updatedByUid', 'updatedAt'
         ]);
       allow delete: if isAdmin() && isValidId(configId);
@@ -655,7 +697,8 @@ service cloud.firestore {
         incoming().serverTimestamp == request.time &&
         exists(/databases/$(database)/documents/events/$(incoming().eventId)) &&
         get(/databases/$(database)/documents/events/$(incoming().eventId)).data.status == 'active' &&
-        incoming().eventTitle == get(/databases/$(database)/documents/events/$(incoming().eventId)).data.title;
+        incoming().eventTitle == get(/databases/$(database)/documents/events/$(incoming().eventId)).data.title &&
+        isFeedbackWindowOpen(incoming().eventId);
       allow update: if false;
       allow delete: if isAdmin() && isValidId(submissionId);
     }

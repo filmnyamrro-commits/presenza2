@@ -1,6 +1,10 @@
 import {
+  ArrowDown,
+  ArrowUp,
   BarChart3,
+  CalendarClock,
   Check,
+  Clock,
   Copy,
   Download,
   ExternalLink,
@@ -18,26 +22,41 @@ import {
   TrendingUp,
 } from 'lucide-react';
 import { type User } from 'firebase/auth';
-import { deleteDoc, doc, serverTimestamp, setDoc } from 'firebase/firestore';
+import {
+  deleteDoc,
+  doc,
+  serverTimestamp,
+  setDoc,
+  Timestamp,
+} from 'firebase/firestore';
 import QRCode from 'qrcode';
 import { useEffect, useMemo, useState } from 'react';
-import { db, handleFirestoreError } from '../firebase';
+import { db, handleFirestoreError, reportFirestoreError } from '../firebase';
 import {
   type EventRecord,
   type FeedbackConfig,
   type FeedbackSubmissionRecord,
   OperationType,
+  type OrganizationBranding,
 } from '../types';
 import { exportFeedbackCsv } from '../utils/csvExport';
-import { generateSafeId } from '../utils/dateTime';
+import { formatLocalDateYmd, generateSafeId } from '../utils/dateTime';
 import {
   buildDefaultFeedbackConfig,
+  evaluateFeedbackSchedule,
+  formatScheduleCountdown,
+  formatScheduleDateTime,
+  isoToLocalDateAndTime,
+  localDateAndTimeToIso,
   mergeFeedbackConfig,
+  parseIsoTimestampMs,
 } from '../utils/feedbackAndRecognitionDefaults';
+import { buildFeedbackQrUrl } from '../utils/qrUrl';
 
 interface AdminFeedbackModuleProps {
   user: User;
   events: EventRecord[];
+  branding?: OrganizationBranding | null;
   feedbackConfigsById: Map<string, FeedbackConfig>;
   feedbackSubmissions: FeedbackSubmissionRecord[];
   onOpenFeedbackForm: (eventId: string) => void;
@@ -46,6 +65,7 @@ interface AdminFeedbackModuleProps {
 export default function AdminFeedbackModule({
   user,
   events,
+  branding,
   feedbackConfigsById,
   feedbackSubmissions,
   onOpenFeedbackForm,
@@ -88,6 +108,9 @@ export default function AdminFeedbackModule({
   const [newStatementCategory, setNewStatementCategory] =
     useState<string>('cat_positive');
   const [newStatementText, setNewStatementText] = useState('');
+  const [newCustomQuestionPrompt, setNewCustomQuestionPrompt] = useState('');
+  const [newCustomQuestionPlaceholder, setNewCustomQuestionPlaceholder] =
+    useState('');
 
   // Keep QR target valid when events update
   useEffect(() => {
@@ -119,11 +142,35 @@ export default function AdminFeedbackModule({
     }
   }, [configTargetId, feedbackConfigsById]);
 
-  const feedbackQrUrl = qrTargetEventId
-    ? `${window.location.origin}/?view=feedback&event=${encodeURIComponent(
-        qrTargetEventId
-      )}`
-    : '';
+  const feedbackQrInfo = qrTargetEventId
+    ? buildFeedbackQrUrl(qrTargetEventId, branding?.publicAppUrl)
+    : null;
+  const feedbackQrUrl = feedbackQrInfo?.url || '';
+  const feedbackQrIsPublic = feedbackQrInfo?.resolution.isPublic ?? true;
+
+  const qrEventEffectiveConfig = useMemo(() => {
+    const specific = qrTargetEventId
+      ? feedbackConfigsById.get(qrTargetEventId)
+      : undefined;
+    const globalDef = feedbackConfigsById.get('default');
+    return mergeFeedbackConfig(
+      specific ?? globalDef ?? null,
+      qrTargetEventId || 'default'
+    );
+  }, [qrTargetEventId, feedbackConfigsById]);
+
+  const qrEventSchedule = useMemo(
+    () => evaluateFeedbackSchedule(qrEventEffectiveConfig),
+    [qrEventEffectiveConfig]
+  );
+
+  const localTimeZoneName = useMemo(() => {
+    try {
+      return Intl.DateTimeFormat().resolvedOptions().timeZone || 'Local Time';
+    } catch {
+      return 'Local Time';
+    }
+  }, []);
 
   useEffect(() => {
     if (!feedbackQrUrl) {
@@ -472,42 +519,255 @@ export default function AdminFeedbackModule({
     setConfigError(null);
   };
 
+  const handleMoveCriterion = (index: number, direction: -1 | 1) => {
+    const target = index + direction;
+    if (target < 0 || target >= draftConfig.ratingCriteria.length) return;
+    setDraftConfig((prev) => {
+      const next = [...prev.ratingCriteria];
+      [next[index], next[target]] = [next[target], next[index]];
+      return { ...prev, ratingCriteria: next };
+    });
+  };
+
+  const handleMoveStatement = (index: number, direction: -1 | 1) => {
+    const target = index + direction;
+    if (target < 0 || target >= draftConfig.statements.length) return;
+    setDraftConfig((prev) => {
+      const next = [...prev.statements];
+      [next[index], next[target]] = [next[target], next[index]];
+      return { ...prev, statements: next };
+    });
+  };
+
+  const handleAddCustomQuestion = () => {
+    const prompt = newCustomQuestionPrompt.trim().slice(0, 200);
+    if (prompt.length < 2) return;
+    if (draftConfig.customQuestions.length >= 6) {
+      setConfigError('Maximum of 6 additional open-ended questions reached.');
+      return;
+    }
+    setDraftConfig((prev) => ({
+      ...prev,
+      customQuestions: [
+        ...prev.customQuestions,
+        {
+          id: generateSafeId('qst'),
+          prompt,
+          placeholder: newCustomQuestionPlaceholder.trim().slice(0, 200),
+          active: true,
+          required: false,
+        },
+      ],
+    }));
+    setNewCustomQuestionPrompt('');
+    setNewCustomQuestionPlaceholder('');
+    setConfigError(null);
+  };
+
+  const handleMoveCustomQuestion = (index: number, direction: -1 | 1) => {
+    const target = index + direction;
+    if (target < 0 || target >= draftConfig.customQuestions.length) return;
+    setDraftConfig((prev) => {
+      const next = [...prev.customQuestions];
+      [next[index], next[target]] = [next[target], next[index]];
+      return { ...prev, customQuestions: next };
+    });
+  };
+
+  const applySchedulePreset = (
+    preset: 'event-window' | 'now-2h' | 'today-workday' | 'clear'
+  ) => {
+    setConfigError(null);
+    if (preset === 'clear') {
+      setDraftConfig((prev) => ({
+        ...prev,
+        openAtIso: '',
+        closeAtIso: '',
+      }));
+      return;
+    }
+
+    if (preset === 'event-window') {
+      const targetEv = events.find((e) => e.id === configTargetId);
+      const baseDate = targetEv?.eventDate || formatLocalDateYmd(new Date());
+      const startTime = targetEv?.startTime || '09:00';
+      const openIso = localDateAndTimeToIso(baseDate, startTime);
+      const openMs = parseIsoTimestampMs(openIso) ?? Date.now();
+      const closeIso = new Date(openMs + 2 * 60 * 60 * 1000).toISOString();
+      setDraftConfig((prev) => ({
+        ...prev,
+        scheduleEnabled: true,
+        openAtIso: openIso,
+        closeAtIso: closeIso,
+      }));
+      return;
+    }
+
+    if (preset === 'now-2h') {
+      const nowRounded = new Date();
+      nowRounded.setSeconds(0, 0);
+      const closeDate = new Date(nowRounded.getTime() + 2 * 60 * 60 * 1000);
+      setDraftConfig((prev) => ({
+        ...prev,
+        scheduleEnabled: true,
+        openAtIso: nowRounded.toISOString(),
+        closeAtIso: closeDate.toISOString(),
+      }));
+      return;
+    }
+
+    const todayStr = formatLocalDateYmd(new Date());
+    setDraftConfig((prev) => ({
+      ...prev,
+      scheduleEnabled: true,
+      openAtIso: localDateAndTimeToIso(todayStr, '08:00'),
+      closeAtIso: localDateAndTimeToIso(todayStr, '17:00'),
+    }));
+  };
+
+  const updateScheduleField = (
+    which: 'open' | 'close',
+    part: 'date' | 'time',
+    value: string
+  ) => {
+    setDraftConfig((prev) => {
+      const currentIso = which === 'open' ? prev.openAtIso : prev.closeAtIso;
+      const existingParts = isoToLocalDateAndTime(currentIso);
+      const defaultDate =
+        events.find((e) => e.id === configTargetId)?.eventDate ||
+        formatLocalDateYmd(new Date());
+
+      let nextDate = existingParts.date;
+      let nextTime = existingParts.time;
+      if (part === 'date') {
+        nextDate = value;
+        if (value && !nextTime) {
+          nextTime = which === 'open' ? '08:00' : '17:00';
+        }
+      } else {
+        nextTime = value;
+        if (value && !nextDate) {
+          nextDate = defaultDate;
+        }
+      }
+
+      const nextIso =
+        nextDate && nextTime ? localDateAndTimeToIso(nextDate, nextTime) : '';
+      return which === 'open'
+        ? { ...prev, openAtIso: nextIso }
+        : { ...prev, closeAtIso: nextIso };
+    });
+  };
+
   const handleSaveFeedbackConfig = async () => {
     setConfigError(null);
     setConfigSaved(false);
 
-    if (draftConfig.ratingCriteria.length === 0) {
-      setConfigError('Please keep at least 1 star rating criterion.');
+    const cleanedCriteria = draftConfig.ratingCriteria
+      .map((c) => ({ ...c, label: c.label.trim().slice(0, 120) }))
+      .filter((c) => c.label.length >= 2);
+    if (cleanedCriteria.length === 0) {
+      setConfigError('Please keep at least 1 star rating question (2+ characters).');
       return;
     }
     if (draftConfig.categories.length === 0) {
       setConfigError('Please keep at least 1 feedback category.');
       return;
     }
+    const cleanedStatements = draftConfig.statements
+      .map((s) => ({ ...s, text: s.text.trim().slice(0, 200) }))
+      .filter((s) => s.text.length >= 2);
+    const cleanedCustomQuestions = draftConfig.customQuestions
+      .map((q) => ({
+        ...q,
+        prompt: q.prompt.trim().slice(0, 200),
+        placeholder: q.placeholder.trim().slice(0, 200),
+      }))
+      .filter((q) => q.prompt.length >= 2);
+
+    const openMs = draftConfig.scheduleEnabled
+      ? parseIsoTimestampMs(draftConfig.openAtIso)
+      : null;
+    const closeMs = draftConfig.scheduleEnabled
+      ? parseIsoTimestampMs(draftConfig.closeAtIso)
+      : null;
+
+    if (draftConfig.scheduleEnabled) {
+      if (openMs === null && closeMs === null) {
+        setConfigError(
+          'Please set an opening time, a closing time, or turn off the time restriction.'
+        );
+        return;
+      }
+      if (openMs !== null && closeMs !== null && closeMs <= openMs) {
+        setConfigError(
+          'Closing date & time must be later than the opening date & time.'
+        );
+        return;
+      }
+    }
 
     setSavingConfig(true);
     try {
-      const payload = {
+      const payload: Record<string, unknown> = {
         eventId: configTargetId,
+        formHeading:
+          draftConfig.formHeading.trim().slice(0, 120) || 'Feedback & Evaluation',
         introNote: draftConfig.introNote.trim().slice(0, 400),
+        ratingSectionTitle:
+          draftConfig.ratingSectionTitle.trim().slice(0, 140) ||
+          '1. Satisfaction Rating (1–5 Stars)',
+        ratingSectionSubtitle: draftConfig.ratingSectionSubtitle
+          .trim()
+          .slice(0, 300),
+        checklistSectionTitle:
+          draftConfig.checklistSectionTitle.trim().slice(0, 140) ||
+          '2. Quick Feedback Checklist',
+        checklistSectionSubtitle: draftConfig.checklistSectionSubtitle
+          .trim()
+          .slice(0, 300),
+        commentQuestionLabel:
+          draftConfig.commentQuestionLabel.trim().slice(0, 160) ||
+          '3. Written Comments',
+        commentPlaceholder: draftConfig.commentPlaceholder.trim().slice(0, 240),
         requireWrittenComment: draftConfig.requireWrittenComment,
-        ratingCriteria: draftConfig.ratingCriteria.slice(0, 12),
+        ratingCriteria: cleanedCriteria.slice(0, 12),
         categories: draftConfig.categories.slice(0, 12),
-        statements: draftConfig.statements.slice(0, 40),
+        statements: cleanedStatements.slice(0, 40),
+        customQuestions: cleanedCustomQuestions.slice(0, 6),
+        scheduleEnabled: draftConfig.scheduleEnabled,
+        openAtIso:
+          draftConfig.scheduleEnabled && openMs !== null
+            ? new Date(openMs).toISOString()
+            : '',
+        closeAtIso:
+          draftConfig.scheduleEnabled && closeMs !== null
+            ? new Date(closeMs).toISOString()
+            : '',
+        scheduleClosedMessage: draftConfig.scheduleClosedMessage
+          .trim()
+          .slice(0, 300),
         updatedByUid: user.uid,
         updatedAt: serverTimestamp(),
       };
+      if (draftConfig.scheduleEnabled && openMs !== null) {
+        payload.openTimestamp = Timestamp.fromMillis(openMs);
+      }
+      if (draftConfig.scheduleEnabled && closeMs !== null) {
+        payload.closeTimestamp = Timestamp.fromMillis(closeMs);
+      }
+
       await setDoc(doc(db, 'feedbackConfigs', configTargetId), payload);
       setConfigSaved(true);
       window.setTimeout(() => setConfigSaved(false), 2500);
     } catch (error) {
-      setConfigError(
-        'Failed to save feedback form settings. Please verify all inputs.'
-      );
-      handleFirestoreError(
+      const info = reportFirestoreError(
         error,
         OperationType.WRITE,
         `feedbackConfigs/${configTargetId}`
+      );
+      setConfigError(
+        `Failed to save feedback settings (${info.code || 'write-error'}): ${info.error}`
       );
     } finally {
       setSavingConfig(false);
@@ -516,6 +776,10 @@ export default function AdminFeedbackModule({
 
   const hasCustomOverrideForTarget =
     configTargetId !== 'default' && feedbackConfigsById.has(configTargetId);
+
+  const openScheduleParts = isoToLocalDateAndTime(draftConfig.openAtIso);
+  const closeScheduleParts = isoToLocalDateAndTime(draftConfig.closeAtIso);
+  const draftScheduleEval = evaluateFeedbackSchedule(draftConfig);
 
   return (
     <div className="space-y-6">
@@ -526,7 +790,7 @@ export default function AdminFeedbackModule({
             Participant Feedback &amp; Evaluation
           </h2>
           <p className="text-xs text-slate-600 mt-0.5">
-            Track satisfaction scores, analyze recurring feedback themes, share event Feedback QR codes, and customize questions per event.
+            Track satisfaction scores, share event Feedback QR codes, customize questions &amp; statements, and schedule when feedback can be filled in.
           </p>
         </div>
 
@@ -561,7 +825,7 @@ export default function AdminFeedbackModule({
             }`}
           >
             <Settings2 className="w-3.5 h-3.5 text-blue-700" />
-            <span>Customize Form &amp; Checklist</span>
+            <span>Customize Questions &amp; Schedule</span>
           </button>
         </div>
       </div>
@@ -591,6 +855,16 @@ export default function AdminFeedbackModule({
                     <p className="text-xs text-slate-600 mt-0.5">
                       Scanning opens the event&apos;s feedback &amp; evaluation form automatically without logging in.
                     </p>
+                    {feedbackQrUrl && (
+                      <p className="text-[11px] font-mono-tabular text-slate-500 mt-1 truncate max-w-xl">
+                        {feedbackQrUrl}
+                      </p>
+                    )}
+                    {feedbackQrUrl && !feedbackQrIsPublic && (
+                      <p className="text-[11px] text-amber-900 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-1 mt-1.5">
+                        Warning: Using private preview/local domain. Set your public Vercel URL in Attendance &amp; Sessions → Branding so phones can open this QR code.
+                      </p>
+                    )}
                     <div className="mt-2 flex flex-wrap items-center gap-2">
                       <select
                         value={qrTargetEventId}
@@ -628,17 +902,68 @@ export default function AdminFeedbackModule({
                         <span>Save QR PNG</span>
                       </button>
                       {qrTargetEventId && (
-                        <button
-                          type="button"
-                          onClick={() => onOpenFeedbackForm(qrTargetEventId)}
-                          className="min-h-[36px] px-3 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold inline-flex items-center gap-1.5"
-                        >
-                          <ExternalLink className="w-3.5 h-3.5" />
-                          <span>Open Form</span>
-                        </button>
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => onOpenFeedbackForm(qrTargetEventId)}
+                            className="min-h-[36px] px-3 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold inline-flex items-center gap-1.5"
+                          >
+                            <ExternalLink className="w-3.5 h-3.5" />
+                            <span>Open Form</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setConfigTargetId(qrTargetEventId);
+                              setSubTab('customize');
+                            }}
+                            className="min-h-[36px] px-3 py-1.5 rounded-lg border border-blue-200 bg-blue-50 hover:bg-blue-100 text-blue-800 text-xs font-semibold inline-flex items-center gap-1.5"
+                          >
+                            <CalendarClock className="w-3.5 h-3.5" />
+                            <span>Edit Questions &amp; Time</span>
+                          </button>
+                        </>
                       )}
                     </div>
                   </div>
+                </div>
+
+                <div className="rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-xs space-y-1 shrink-0 lg:max-w-xs">
+                  <div className="flex items-center gap-1.5 font-semibold text-slate-800">
+                    <Clock className="w-3.5 h-3.5 text-blue-700" />
+                    <span>Submission Schedule</span>
+                    <span
+                      className={`ml-auto px-2 py-0.5 rounded-md text-[10px] font-bold uppercase ${
+                        qrEventSchedule.status === 'always-open' ||
+                        qrEventSchedule.status === 'open'
+                          ? 'bg-emerald-100 text-emerald-800'
+                          : qrEventSchedule.status === 'before-open'
+                          ? 'bg-amber-100 text-amber-800'
+                          : 'bg-rose-100 text-rose-800'
+                      }`}
+                    >
+                      {qrEventSchedule.status === 'always-open'
+                        ? 'Always Open'
+                        : qrEventSchedule.status === 'open'
+                        ? 'Open Now'
+                        : qrEventSchedule.status === 'before-open'
+                        ? 'Scheduled'
+                        : 'Closed'}
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-slate-600 leading-snug">
+                    {!qrEventEffectiveConfig.scheduleEnabled
+                      ? 'Open anytime while the session is active.'
+                      : `${
+                          qrEventEffectiveConfig.openAtIso
+                            ? `From ${formatScheduleDateTime(qrEventEffectiveConfig.openAtIso)}`
+                            : 'Open immediately'
+                        } · ${
+                          qrEventEffectiveConfig.closeAtIso
+                            ? `Until ${formatScheduleDateTime(qrEventEffectiveConfig.closeAtIso)}`
+                            : 'No closing cutoff'
+                        }`}
+                  </p>
                 </div>
               </div>
             </section>
@@ -1126,6 +1451,25 @@ export default function AdminFeedbackModule({
                             ))}
                           </div>
                         )}
+
+                        {Array.isArray(sub.customAnswers) &&
+                          sub.customAnswers.length > 0 && (
+                            <div className="pt-1.5 space-y-1">
+                              {sub.customAnswers.map((ans) => (
+                                <div
+                                  key={ans.questionId}
+                                  className="text-xs bg-blue-50/60 border border-blue-100 rounded-lg px-3 py-1.5"
+                                >
+                                  <span className="font-semibold text-blue-900">
+                                    {ans.prompt}:{' '}
+                                  </span>
+                                  <span className="text-slate-700">
+                                    {ans.answer}
+                                  </span>
+                                </div>
+                              ))}
+                            </div>
+                          )}
                       </div>
 
                       <div className="flex items-center gap-3 shrink-0">
@@ -1164,7 +1508,7 @@ export default function AdminFeedbackModule({
           )}
         </div>
       ) : (
-        /* Sub-tab B: Customize Feedback Form & Checklist Statements */
+        /* Sub-tab B: Customize Feedback Questions, Statements & Schedule */
         <div className="bg-white border border-slate-200 rounded-2xl p-6 space-y-6">
           <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 pb-5 border-b border-slate-200">
             <div className="space-y-1">
@@ -1226,7 +1570,7 @@ export default function AdminFeedbackModule({
                 ) : (
                   <Save className="w-3.5 h-3.5" />
                 )}
-                <span>{configSaved ? 'Saved!' : 'Save Form Configuration'}</span>
+                <span>{configSaved ? 'Saved!' : 'Save Form & Schedule'}</span>
               </button>
             </div>
           </div>
@@ -1237,59 +1581,427 @@ export default function AdminFeedbackModule({
             </div>
           )}
 
-          {/* Intro Note & Written Comment Requirement */}
-          <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-end">
-            <div className="lg:col-span-8">
-              <label
-                htmlFor="fb-intro-note"
-                className="block text-xs font-semibold text-slate-700 mb-1.5"
-              >
-                Form Welcome / Intro Note
-              </label>
-              <input
-                id="fb-intro-note"
-                type="text"
-                maxLength={400}
-                value={draftConfig.introNote}
-                onChange={(e) =>
-                  setDraftConfig((prev) => ({
-                    ...prev,
-                    introNote: e.target.value,
-                  }))
-                }
-                className="w-full min-h-[42px] px-3.5 py-2 text-sm border border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-600"
-              />
-            </div>
+          {/* 1. Submission Time Schedule */}
+          <section className="rounded-2xl border border-blue-200 bg-blue-50/40 p-4 sm:p-5 space-y-4">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div>
+                <h3 className="text-sm font-bold text-slate-900 inline-flex items-center gap-2">
+                  <CalendarClock className="w-4 h-4 text-blue-700" />
+                  <span>Feedback &amp; Evaluation Submission Time Window</span>
+                </h3>
+                <p className="text-xs text-slate-600 mt-0.5">
+                  Control when participants can fill in and submit feedback. Enforced live on the form and on Firestore security rules ({localTimeZoneName}).
+                </p>
+              </div>
 
-            <div className="lg:col-span-4">
-              <label className="min-h-[42px] px-3.5 py-2 rounded-xl border border-slate-200 bg-slate-50 flex items-center gap-2.5 cursor-pointer">
+              <label className="min-h-[40px] px-3.5 py-2 rounded-xl border border-blue-200 bg-white flex items-center gap-2.5 cursor-pointer shrink-0">
                 <input
                   type="checkbox"
-                  checked={draftConfig.requireWrittenComment}
+                  checked={draftConfig.scheduleEnabled}
                   onChange={(e) =>
                     setDraftConfig((prev) => ({
                       ...prev,
-                      requireWrittenComment: e.target.checked,
+                      scheduleEnabled: e.target.checked,
                     }))
                   }
                   className="rounded border-slate-300 text-blue-700 focus:ring-blue-600"
                 />
-                <span className="text-xs font-semibold text-slate-800">
-                  Make Written Comments Mandatory
+                <span className="text-xs font-semibold text-slate-900">
+                  Enable Scheduled Time Window
                 </span>
               </label>
             </div>
-          </div>
+
+            {draftConfig.scheduleEnabled ? (
+              <div className="space-y-4 pt-2 border-t border-blue-200/70">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-[11px] font-semibold uppercase tracking-wider text-slate-500 mr-1">
+                    Quick Fill:
+                  </span>
+                  {configTargetId !== 'default' && (
+                    <button
+                      type="button"
+                      onClick={() => applySchedulePreset('event-window')}
+                      className="min-h-[32px] px-2.5 py-1 rounded-lg border border-slate-300 bg-white hover:bg-slate-100 text-xs font-medium text-slate-800"
+                    >
+                      Event Date &amp; Start (+2h)
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => applySchedulePreset('now-2h')}
+                    className="min-h-[32px] px-2.5 py-1 rounded-lg border border-slate-300 bg-white hover:bg-slate-100 text-xs font-medium text-slate-800"
+                  >
+                    Open Now for 2 Hours
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => applySchedulePreset('today-workday')}
+                    className="min-h-[32px] px-2.5 py-1 rounded-lg border border-slate-300 bg-white hover:bg-slate-100 text-xs font-medium text-slate-800"
+                  >
+                    Today (08:00 – 17:00)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => applySchedulePreset('clear')}
+                    className="min-h-[32px] px-2.5 py-1 rounded-lg border border-slate-200 bg-white hover:bg-rose-50 hover:text-rose-700 text-xs font-medium text-slate-600"
+                  >
+                    Clear Times
+                  </button>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div className="rounded-xl border border-slate-200 bg-white p-3.5 space-y-2">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-bold text-slate-800">
+                        Opens At (Start Date &amp; Time)
+                      </span>
+                      <span className="text-[11px] text-slate-500">
+                        Optional
+                      </span>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                      <input
+                        type="date"
+                        aria-label="Feedback opening date"
+                        value={openScheduleParts.date}
+                        onChange={(e) =>
+                          updateScheduleField('open', 'date', e.target.value)
+                        }
+                        className="min-h-[38px] px-2.5 py-1.5 text-xs sm:text-sm border border-slate-300 rounded-lg bg-slate-50 focus:outline-none focus:ring-2 focus:ring-blue-600"
+                      />
+                      <input
+                        type="time"
+                        aria-label="Feedback opening time"
+                        value={openScheduleParts.time}
+                        onChange={(e) =>
+                          updateScheduleField('open', 'time', e.target.value)
+                        }
+                        className="min-h-[38px] px-2.5 py-1.5 text-xs sm:text-sm border border-slate-300 rounded-lg bg-slate-50 focus:outline-none focus:ring-2 focus:ring-blue-600"
+                      />
+                    </div>
+                    <p className="text-[11px] text-slate-500">
+                      {draftConfig.openAtIso
+                        ? `Participants can enter starting ${formatScheduleDateTime(draftConfig.openAtIso)}`
+                        : 'Leave blank to allow submissions immediately.'}
+                    </p>
+                  </div>
+
+                  <div className="rounded-xl border border-slate-200 bg-white p-3.5 space-y-2">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-bold text-slate-800">
+                        Closes At (End Date &amp; Time)
+                      </span>
+                      <span className="text-[11px] text-slate-500">
+                        Optional
+                      </span>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                      <input
+                        type="date"
+                        aria-label="Feedback closing date"
+                        value={closeScheduleParts.date}
+                        onChange={(e) =>
+                          updateScheduleField('close', 'date', e.target.value)
+                        }
+                        className="min-h-[38px] px-2.5 py-1.5 text-xs sm:text-sm border border-slate-300 rounded-lg bg-slate-50 focus:outline-none focus:ring-2 focus:ring-blue-600"
+                      />
+                      <input
+                        type="time"
+                        aria-label="Feedback closing time"
+                        value={closeScheduleParts.time}
+                        onChange={(e) =>
+                          updateScheduleField('close', 'time', e.target.value)
+                        }
+                        className="min-h-[38px] px-2.5 py-1.5 text-xs sm:text-sm border border-slate-300 rounded-lg bg-slate-50 focus:outline-none focus:ring-2 focus:ring-blue-600"
+                      />
+                    </div>
+                    <p className="text-[11px] text-slate-500">
+                      {draftConfig.closeAtIso
+                        ? `Submissions lock after ${formatScheduleDateTime(draftConfig.closeAtIso)}`
+                        : 'Leave blank to keep open until the session is closed.'}
+                    </p>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 lg:grid-cols-12 gap-3 items-center">
+                  <div className="lg:col-span-8">
+                    <label
+                      htmlFor="fb-schedule-closed-msg"
+                      className="block text-xs font-semibold text-slate-700 mb-1"
+                    >
+                      Custom Message When Outside Scheduled Time (Optional)
+                    </label>
+                    <input
+                      id="fb-schedule-closed-msg"
+                      type="text"
+                      maxLength={300}
+                      value={draftConfig.scheduleClosedMessage}
+                      onChange={(e) =>
+                        setDraftConfig((prev) => ({
+                          ...prev,
+                          scheduleClosedMessage: e.target.value,
+                        }))
+                      }
+                      placeholder="e.g. Evaluation opens during the final 30 minutes of the workshop."
+                      className="w-full min-h-[38px] px-3 py-1.5 text-xs sm:text-sm bg-white border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-600"
+                    />
+                  </div>
+                  <div className="lg:col-span-4 rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-xs">
+                    <div className="text-[11px] font-semibold text-slate-500">
+                      Live Status Preview
+                    </div>
+                    <div
+                      className={`mt-0.5 font-bold ${
+                        draftScheduleEval.status === 'open'
+                          ? 'text-emerald-700'
+                          : draftScheduleEval.status === 'before-open'
+                          ? 'text-amber-700'
+                          : 'text-rose-700'
+                      }`}
+                    >
+                      {draftScheduleEval.status === 'open' &&
+                        (draftScheduleEval.closeAtMs
+                          ? `Open Now · Closes in ${formatScheduleCountdown(
+                              draftScheduleEval.closeAtMs - Date.now()
+                            )}`
+                          : 'Open Now')}
+                      {draftScheduleEval.status === 'before-open' &&
+                        draftScheduleEval.openAtMs &&
+                        `Opens in ${formatScheduleCountdown(
+                          draftScheduleEval.openAtMs - Date.now()
+                        )}`}
+                      {draftScheduleEval.status === 'closed' &&
+                        'Currently Closed'}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <p className="text-xs text-slate-600 bg-white/80 border border-blue-100 rounded-xl px-3.5 py-2.5">
+                Schedule restriction is off — participants can fill in Feedback &amp; Evaluation anytime while the event session is active.
+              </p>
+            )}
+          </section>
+
+          {/* 2. Menu Heading, Welcome Statement & Section Labels */}
+          <section className="pt-4 border-t border-slate-200 space-y-4">
+            <div>
+              <h3 className="text-sm font-bold text-slate-900">
+                Feedback &amp; Evaluation Menu Statements &amp; Section Prompts
+              </h3>
+              <p className="text-xs text-slate-500">
+                Customize the title, welcome statement, section headings, and written question displayed on the participant feedback menu.
+              </p>
+            </div>
+
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
+              <div className="lg:col-span-4">
+                <label
+                  htmlFor="fb-form-heading"
+                  className="block text-xs font-semibold text-slate-700 mb-1.5"
+                >
+                  Menu / Form Heading
+                </label>
+                <input
+                  id="fb-form-heading"
+                  type="text"
+                  maxLength={120}
+                  value={draftConfig.formHeading}
+                  onChange={(e) =>
+                    setDraftConfig((prev) => ({
+                      ...prev,
+                      formHeading: e.target.value,
+                    }))
+                  }
+                  className="w-full min-h-[40px] px-3.5 py-2 text-sm border border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-600"
+                />
+              </div>
+
+              <div className="lg:col-span-8">
+                <label
+                  htmlFor="fb-intro-note"
+                  className="block text-xs font-semibold text-slate-700 mb-1.5"
+                >
+                  Welcome / Intro Statement
+                </label>
+                <input
+                  id="fb-intro-note"
+                  type="text"
+                  maxLength={400}
+                  value={draftConfig.introNote}
+                  onChange={(e) =>
+                    setDraftConfig((prev) => ({
+                      ...prev,
+                      introNote: e.target.value,
+                    }))
+                  }
+                  className="w-full min-h-[40px] px-3.5 py-2 text-sm border border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-600"
+                />
+              </div>
+
+              <div className="lg:col-span-5">
+                <label
+                  htmlFor="fb-rating-title"
+                  className="block text-xs font-semibold text-slate-700 mb-1.5"
+                >
+                  Rating Section Heading
+                </label>
+                <input
+                  id="fb-rating-title"
+                  type="text"
+                  maxLength={140}
+                  value={draftConfig.ratingSectionTitle}
+                  onChange={(e) =>
+                    setDraftConfig((prev) => ({
+                      ...prev,
+                      ratingSectionTitle: e.target.value,
+                    }))
+                  }
+                  className="w-full min-h-[40px] px-3.5 py-2 text-sm border border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-600"
+                />
+              </div>
+
+              <div className="lg:col-span-7">
+                <label
+                  htmlFor="fb-rating-subtitle"
+                  className="block text-xs font-semibold text-slate-700 mb-1.5"
+                >
+                  Rating Section Instruction / Statement
+                </label>
+                <input
+                  id="fb-rating-subtitle"
+                  type="text"
+                  maxLength={300}
+                  value={draftConfig.ratingSectionSubtitle}
+                  onChange={(e) =>
+                    setDraftConfig((prev) => ({
+                      ...prev,
+                      ratingSectionSubtitle: e.target.value,
+                    }))
+                  }
+                  className="w-full min-h-[40px] px-3.5 py-2 text-sm border border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-600"
+                />
+              </div>
+
+              <div className="lg:col-span-5">
+                <label
+                  htmlFor="fb-checklist-title"
+                  className="block text-xs font-semibold text-slate-700 mb-1.5"
+                >
+                  Checklist Section Heading
+                </label>
+                <input
+                  id="fb-checklist-title"
+                  type="text"
+                  maxLength={140}
+                  value={draftConfig.checklistSectionTitle}
+                  onChange={(e) =>
+                    setDraftConfig((prev) => ({
+                      ...prev,
+                      checklistSectionTitle: e.target.value,
+                    }))
+                  }
+                  className="w-full min-h-[40px] px-3.5 py-2 text-sm border border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-600"
+                />
+              </div>
+
+              <div className="lg:col-span-7">
+                <label
+                  htmlFor="fb-checklist-subtitle"
+                  className="block text-xs font-semibold text-slate-700 mb-1.5"
+                >
+                  Checklist Section Instruction / Statement
+                </label>
+                <input
+                  id="fb-checklist-subtitle"
+                  type="text"
+                  maxLength={300}
+                  value={draftConfig.checklistSectionSubtitle}
+                  onChange={(e) =>
+                    setDraftConfig((prev) => ({
+                      ...prev,
+                      checklistSectionSubtitle: e.target.value,
+                    }))
+                  }
+                  className="w-full min-h-[40px] px-3.5 py-2 text-sm border border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-600"
+                />
+              </div>
+
+              <div className="lg:col-span-4">
+                <label
+                  htmlFor="fb-comment-label"
+                  className="block text-xs font-semibold text-slate-700 mb-1.5"
+                >
+                  Written Comment Question Label
+                </label>
+                <input
+                  id="fb-comment-label"
+                  type="text"
+                  maxLength={160}
+                  value={draftConfig.commentQuestionLabel}
+                  onChange={(e) =>
+                    setDraftConfig((prev) => ({
+                      ...prev,
+                      commentQuestionLabel: e.target.value,
+                    }))
+                  }
+                  className="w-full min-h-[40px] px-3.5 py-2 text-sm border border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-600"
+                />
+              </div>
+
+              <div className="lg:col-span-5">
+                <label
+                  htmlFor="fb-comment-placeholder"
+                  className="block text-xs font-semibold text-slate-700 mb-1.5"
+                >
+                  Written Comment Placeholder / Hint
+                </label>
+                <input
+                  id="fb-comment-placeholder"
+                  type="text"
+                  maxLength={240}
+                  value={draftConfig.commentPlaceholder}
+                  onChange={(e) =>
+                    setDraftConfig((prev) => ({
+                      ...prev,
+                      commentPlaceholder: e.target.value,
+                    }))
+                  }
+                  className="w-full min-h-[40px] px-3.5 py-2 text-sm border border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-600"
+                />
+              </div>
+
+              <div className="lg:col-span-3 flex items-end">
+                <label className="w-full min-h-[40px] px-3.5 py-2 rounded-xl border border-slate-200 bg-slate-50 flex items-center gap-2.5 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={draftConfig.requireWrittenComment}
+                    onChange={(e) =>
+                      setDraftConfig((prev) => ({
+                        ...prev,
+                        requireWrittenComment: e.target.checked,
+                      }))
+                    }
+                    className="rounded border-slate-300 text-blue-700 focus:ring-blue-600"
+                  />
+                  <span className="text-xs font-semibold text-slate-800">
+                    Written Comment Mandatory
+                  </span>
+                </label>
+              </div>
+            </div>
+          </section>
 
           {/* Star Rating Criteria Editor */}
           <div className="pt-4 border-t border-slate-200 space-y-3">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
               <div>
                 <h3 className="text-sm font-bold text-slate-900">
-                  1–5 Star Rating Areas ({draftConfig.ratingCriteria.length}/12)
+                  1–5 Star Rating Questions ({draftConfig.ratingCriteria.length}/12)
                 </h3>
                 <p className="text-xs text-slate-500">
-                  Customize evaluation areas, activate/deactivate questions, or set them as mandatory.
+                  Customize evaluation questions, reorder them, activate/deactivate items, or set them as mandatory.
                 </p>
               </div>
               <div className="flex items-center gap-2">
@@ -1298,7 +2010,7 @@ export default function AdminFeedbackModule({
                   maxLength={120}
                   value={newCriterionLabel}
                   onChange={(e) => setNewCriterionLabel(e.target.value)}
-                  placeholder="New rating area..."
+                  placeholder="New rating question..."
                   className="min-h-[38px] px-3 py-1.5 text-xs border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-600"
                 />
                 <button
@@ -1307,17 +2019,37 @@ export default function AdminFeedbackModule({
                   className="min-h-[38px] px-3 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold inline-flex items-center gap-1 whitespace-nowrap"
                 >
                   <Plus className="w-3.5 h-3.5" />
-                  <span>Add Area</span>
+                  <span>Add Question</span>
                 </button>
               </div>
             </div>
 
             <div className="space-y-2">
-              {draftConfig.ratingCriteria.map((crit) => (
+              {draftConfig.ratingCriteria.map((crit, idx) => (
                 <div
                   key={crit.id}
-                  className="flex flex-wrap sm:flex-nowrap items-center gap-2.5 p-2.5 rounded-xl border border-slate-200 bg-slate-50/70"
+                  className="flex flex-wrap sm:flex-nowrap items-center gap-2 p-2.5 rounded-xl border border-slate-200 bg-slate-50/70"
                 >
+                  <div className="flex items-center gap-1 shrink-0">
+                    <button
+                      type="button"
+                      disabled={idx === 0}
+                      onClick={() => handleMoveCriterion(idx, -1)}
+                      aria-label={`Move ${crit.label} up`}
+                      className="min-h-[30px] min-w-[30px] rounded-md text-slate-500 hover:bg-white hover:text-slate-900 inline-flex items-center justify-center disabled:opacity-30"
+                    >
+                      <ArrowUp className="w-3.5 h-3.5" />
+                    </button>
+                    <button
+                      type="button"
+                      disabled={idx === draftConfig.ratingCriteria.length - 1}
+                      onClick={() => handleMoveCriterion(idx, 1)}
+                      aria-label={`Move ${crit.label} down`}
+                      className="min-h-[30px] min-w-[30px] rounded-md text-slate-500 hover:bg-white hover:text-slate-900 inline-flex items-center justify-center disabled:opacity-30"
+                    >
+                      <ArrowDown className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
                   <input
                     type="text"
                     maxLength={120}
@@ -1482,7 +2214,7 @@ export default function AdminFeedbackModule({
                 Quick Feedback Checklist Statements ({draftConfig.statements.length}/40)
               </h3>
               <p className="text-xs text-slate-500">
-                Add, edit, delete, activate/deactivate, or mark checklist statements as mandatory.
+                Add, edit, reorder, delete, activate/deactivate, or mark checklist statements as mandatory.
               </p>
             </div>
 
@@ -1518,11 +2250,32 @@ export default function AdminFeedbackModule({
             </div>
 
             <div className="space-y-2">
-              {draftConfig.statements.map((stmt) => (
+              {draftConfig.statements.map((stmt, idx) => (
                 <div
                   key={stmt.id}
                   className="flex flex-wrap lg:flex-nowrap items-center gap-2 p-2.5 rounded-xl border border-slate-200 bg-white"
                 >
+                  <div className="flex items-center gap-1 shrink-0">
+                    <button
+                      type="button"
+                      disabled={idx === 0}
+                      onClick={() => handleMoveStatement(idx, -1)}
+                      aria-label={`Move statement ${stmt.text} up`}
+                      className="min-h-[30px] min-w-[30px] rounded-md text-slate-500 hover:bg-slate-100 hover:text-slate-900 inline-flex items-center justify-center disabled:opacity-30"
+                    >
+                      <ArrowUp className="w-3.5 h-3.5" />
+                    </button>
+                    <button
+                      type="button"
+                      disabled={idx === draftConfig.statements.length - 1}
+                      onClick={() => handleMoveStatement(idx, 1)}
+                      aria-label={`Move statement ${stmt.text} down`}
+                      className="min-h-[30px] min-w-[30px] rounded-md text-slate-500 hover:bg-slate-100 hover:text-slate-900 inline-flex items-center justify-center disabled:opacity-30"
+                    >
+                      <ArrowDown className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+
                   <select
                     value={stmt.categoryId}
                     onChange={(e) =>
@@ -1613,6 +2366,162 @@ export default function AdminFeedbackModule({
                 </div>
               ))}
             </div>
+          </div>
+
+          {/* Custom Open-Ended Questions Editor */}
+          <div className="pt-4 border-t border-slate-200 space-y-3">
+            <div>
+              <h3 className="text-sm font-bold text-slate-900">
+                Additional Open-Ended Questions ({draftConfig.customQuestions.length}/6)
+              </h3>
+              <p className="text-xs text-slate-500">
+                Add optional reflection or topic questions (for example: &ldquo;What was your key takeaway?&rdquo; or &ldquo;What topic should we offer next?&rdquo;).
+              </p>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-12 gap-2 p-3 rounded-xl border border-slate-200 bg-slate-50">
+              <input
+                type="text"
+                maxLength={200}
+                value={newCustomQuestionPrompt}
+                onChange={(e) => setNewCustomQuestionPrompt(e.target.value)}
+                placeholder="Question prompt (e.g. What was your biggest takeaway?)..."
+                className="sm:col-span-6 min-h-[40px] px-3 py-2 text-xs sm:text-sm bg-white border border-slate-300 rounded-lg text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-600"
+              />
+              <input
+                type="text"
+                maxLength={200}
+                value={newCustomQuestionPlaceholder}
+                onChange={(e) =>
+                  setNewCustomQuestionPlaceholder(e.target.value)
+                }
+                placeholder="Optional answer placeholder..."
+                className="sm:col-span-4 min-h-[40px] px-3 py-2 text-xs sm:text-sm bg-white border border-slate-300 rounded-lg text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-600"
+              />
+              <button
+                type="button"
+                onClick={handleAddCustomQuestion}
+                className="sm:col-span-2 min-h-[40px] px-3 py-2 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold inline-flex items-center justify-center gap-1.5 whitespace-nowrap"
+              >
+                <Plus className="w-3.5 h-3.5" />
+                <span>Add Question</span>
+              </button>
+            </div>
+
+            {draftConfig.customQuestions.length > 0 && (
+              <div className="space-y-2">
+                {draftConfig.customQuestions.map((q, idx) => (
+                  <div
+                    key={q.id}
+                    className="flex flex-wrap lg:flex-nowrap items-center gap-2 p-2.5 rounded-xl border border-slate-200 bg-white"
+                  >
+                    <div className="flex items-center gap-1 shrink-0">
+                      <button
+                        type="button"
+                        disabled={idx === 0}
+                        onClick={() => handleMoveCustomQuestion(idx, -1)}
+                        aria-label={`Move question ${q.prompt} up`}
+                        className="min-h-[30px] min-w-[30px] rounded-md text-slate-500 hover:bg-slate-100 hover:text-slate-900 inline-flex items-center justify-center disabled:opacity-30"
+                      >
+                        <ArrowUp className="w-3.5 h-3.5" />
+                      </button>
+                      <button
+                        type="button"
+                        disabled={idx === draftConfig.customQuestions.length - 1}
+                        onClick={() => handleMoveCustomQuestion(idx, 1)}
+                        aria-label={`Move question ${q.prompt} down`}
+                        className="min-h-[30px] min-w-[30px] rounded-md text-slate-500 hover:bg-slate-100 hover:text-slate-900 inline-flex items-center justify-center disabled:opacity-30"
+                      >
+                        <ArrowDown className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                    <input
+                      type="text"
+                      maxLength={200}
+                      value={q.prompt}
+                      onChange={(e) =>
+                        setDraftConfig((prev) => ({
+                          ...prev,
+                          customQuestions: prev.customQuestions.map((item) =>
+                            item.id === q.id
+                              ? { ...item, prompt: e.target.value }
+                              : item
+                          ),
+                        }))
+                      }
+                      placeholder="Question prompt"
+                      className="flex-1 min-w-[200px] min-h-[36px] px-3 py-1 text-xs sm:text-sm border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-600"
+                    />
+                    <input
+                      type="text"
+                      maxLength={200}
+                      value={q.placeholder}
+                      onChange={(e) =>
+                        setDraftConfig((prev) => ({
+                          ...prev,
+                          customQuestions: prev.customQuestions.map((item) =>
+                            item.id === q.id
+                              ? { ...item, placeholder: e.target.value }
+                              : item
+                          ),
+                        }))
+                      }
+                      placeholder="Hint placeholder"
+                      className="w-full sm:w-52 min-h-[36px] px-3 py-1 text-xs border border-slate-200 rounded-lg text-slate-700 focus:outline-none focus:ring-2 focus:ring-blue-600"
+                    />
+                    <label className="inline-flex items-center gap-1.5 text-xs font-medium text-slate-700 px-2">
+                      <input
+                        type="checkbox"
+                        checked={q.active}
+                        onChange={(e) =>
+                          setDraftConfig((prev) => ({
+                            ...prev,
+                            customQuestions: prev.customQuestions.map((item) =>
+                              item.id === q.id
+                                ? { ...item, active: e.target.checked }
+                                : item
+                            ),
+                          }))
+                        }
+                      />
+                      <span>Active</span>
+                    </label>
+                    <label className="inline-flex items-center gap-1.5 text-xs font-medium text-slate-700 px-2">
+                      <input
+                        type="checkbox"
+                        checked={q.required}
+                        onChange={(e) =>
+                          setDraftConfig((prev) => ({
+                            ...prev,
+                            customQuestions: prev.customQuestions.map((item) =>
+                              item.id === q.id
+                                ? { ...item, required: e.target.checked }
+                                : item
+                            ),
+                          }))
+                        }
+                      />
+                      <span>Mandatory</span>
+                    </label>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setDraftConfig((prev) => ({
+                          ...prev,
+                          customQuestions: prev.customQuestions.filter(
+                            (item) => item.id !== q.id
+                          ),
+                        }))
+                      }
+                      className="min-h-[34px] min-w-[34px] rounded-lg text-slate-400 hover:text-rose-700 hover:bg-rose-50 inline-flex items-center justify-center"
+                      aria-label={`Delete question ${q.prompt}`}
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         </div>
       )}

@@ -49,47 +49,83 @@ export function captureVideoFrame(
 }
 
 export async function compressImageFile(file: File): Promise<string> {
-  if (!file.type.startsWith('image/')) {
+  const isImageByType = file.type.startsWith('image/');
+  const isImageByExt = /\.(jpe?g|png|webp|gif|heic|heif|bmp)$/i.test(file.name || '');
+  if (!isImageByType && !isImageByExt) {
     throw new Error('Please select a valid image file (JPG, PNG, or WebP).');
   }
 
-  const dataUrl = await new Promise<string>((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => {
-      if (typeof reader.result === 'string') {
-        resolve(reader.result);
-      } else {
-        reject(new Error('Failed to read selected image.'));
+  let objectUrl: string | null = null;
+  const loadImage = async (): Promise<HTMLImageElement> => {
+    if (typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function') {
+      try {
+        objectUrl = URL.createObjectURL(file);
+        return await new Promise<HTMLImageElement>((resolve, reject) => {
+          const element = new Image();
+          element.onload = () => resolve(element);
+          element.onerror = () => reject(new Error('objecturl-load-failed'));
+          element.src = objectUrl!;
+        });
+      } catch {
+        if (objectUrl) {
+          URL.revokeObjectURL(objectUrl);
+          objectUrl = null;
+        }
       }
-    };
-    reader.onerror = () => reject(new Error('Failed to read selected image.'));
-    reader.readAsDataURL(file);
-  });
+    }
 
-  const img = await new Promise<HTMLImageElement>((resolve, reject) => {
-    const element = new Image();
-    element.onload = () => resolve(element);
-    element.onerror = () => reject(new Error('Selected file is not a supported image.'));
-    element.src = dataUrl;
-  });
+    const dataUrl = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        if (typeof reader.result === 'string') {
+          resolve(reader.result);
+        } else {
+          reject(new Error('Failed to read selected image.'));
+        }
+      };
+      reader.onerror = () => reject(new Error('Failed to read selected image.'));
+      reader.readAsDataURL(file);
+    });
 
-  const ratio = Math.min(1, MAX_DIMENSION / Math.max(img.width, img.height));
-  const width = Math.max(1, Math.round(img.width * ratio));
-  const height = Math.max(1, Math.round(img.height * ratio));
+    return await new Promise<HTMLImageElement>((resolve, reject) => {
+      const element = new Image();
+      element.onload = () => resolve(element);
+      element.onerror = () =>
+        reject(
+          new Error(
+            'This photo format could not be processed. Please use JPG, PNG, or WebP, or take a picture with the live camera.'
+          )
+        );
+      element.src = dataUrl;
+    });
+  };
 
-  const canvas = document.createElement('canvas');
-  canvas.width = width;
-  canvas.height = height;
-  const ctx = canvas.getContext('2d');
-  if (!ctx) {
-    throw new Error('Unable to process image.');
+  try {
+    const img = await loadImage();
+    const srcW = img.naturalWidth || img.width || 640;
+    const srcH = img.naturalHeight || img.height || 480;
+    const ratio = Math.min(1, MAX_DIMENSION / Math.max(srcW, srcH));
+    const width = Math.max(1, Math.round(srcW * ratio));
+    const height = Math.max(1, Math.round(srcH * ratio));
+
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) {
+      throw new Error('Unable to process image.');
+    }
+
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, width, height);
+    ctx.drawImage(img, 0, 0, width, height);
+
+    return encodeCanvasUnderLimit(canvas);
+  } finally {
+    if (objectUrl) {
+      URL.revokeObjectURL(objectUrl);
+    }
   }
-
-  ctx.fillStyle = '#ffffff';
-  ctx.fillRect(0, 0, width, height);
-  ctx.drawImage(img, 0, 0, width, height);
-
-  return encodeCanvasUnderLimit(canvas);
 }
 
 const MAX_BG_DIMENSION = 1400;
