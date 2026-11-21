@@ -12,7 +12,9 @@ import {
   Maximize2,
   Minimize2,
   MonitorPlay,
+  Pin,
   Printer,
+  Sparkles,
   Users,
   X,
 } from 'lucide-react';
@@ -73,11 +75,57 @@ export default function QrPosterModal({
   const [savingPublicUrl, setSavingPublicUrl] = useState(false);
   const [publicUrlError, setPublicUrlError] = useState<string | null>(null);
   const [editingPublicUrl, setEditingPublicUrl] = useState(false);
+  const [popupQueue, setPopupQueue] = useState<AttendanceRecord[]>([]);
+  const [popupPinned, setPopupPinned] = useState(false);
   const bgFileInputRef = useRef<HTMLInputElement | null>(null);
+  const baselineIdsRef = useRef<Set<string>>(new Set());
+  const baselineEventIdRef = useRef<string>('');
 
   useEffect(() => {
     setPublicUrlDraft(branding?.publicAppUrl || '');
   }, [branding?.publicAppUrl]);
+
+  // Track newly checked-in participants arriving while QrPosterModal is open
+  useEffect(() => {
+    if (baselineEventIdRef.current !== event.id) {
+      baselineEventIdRef.current = event.id;
+      baselineIdsRef.current = new Set(eventAttendances.map((a) => a.id));
+      setPopupQueue([]);
+      setPopupPinned(false);
+      return;
+    }
+
+    const newlyArrived: AttendanceRecord[] = [];
+    for (const rec of eventAttendances) {
+      if (!baselineIdsRef.current.has(rec.id)) {
+        baselineIdsRef.current.add(rec.id);
+        newlyArrived.push(rec);
+      }
+    }
+
+    if (newlyArrived.length > 0) {
+      setPopupQueue((prev) => {
+        const existing = new Set(prev.map((item) => item.id));
+        const additions = newlyArrived.filter((item) => !existing.has(item.id));
+        return additions.length > 0 ? [...prev, ...additions] : prev;
+      });
+    }
+  }, [event.id, eventAttendances]);
+
+  useEffect(() => {
+    if (popupQueue.length === 0 || popupPinned) return;
+    const timer = window.setTimeout(() => {
+      setPopupQueue((prev) => prev.slice(1));
+    }, 8500);
+    return () => window.clearTimeout(timer);
+  }, [popupQueue, popupPinned]);
+
+  const activePopup = popupQueue[0] ?? null;
+  const activePopupRank = useMemo(() => {
+    if (!activePopup) return null;
+    const idx = eventAttendances.findIndex((a) => a.id === activePopup.id);
+    return idx >= 0 ? idx + 1 : null;
+  }, [activePopup, eventAttendances]);
 
   const checkInInfo = buildCheckInQrUrl(event.id, branding?.publicAppUrl);
   const feedbackInfo = buildFeedbackQrUrl(event.id, branding?.publicAppUrl);
@@ -703,6 +751,111 @@ export default function QrPosterModal({
               </div>
             )}
             </div>
+
+            {/* Live Pop-Up Photo Spotlight over right column (leaves left QR completely scannable) */}
+            <AnimatePresence mode="wait">
+              {activePopup && (
+                <motion.div
+                  key={`poster-popup-${activePopup.id}`}
+                  initial={{ opacity: 0, scale: 0.9 }}
+                  animate={{ opacity: 1, scale: 1 }}
+                  exit={{ opacity: 0, scale: 0.94 }}
+                  transition={{ type: 'spring', stiffness: 320, damping: 22 }}
+                  className="absolute inset-0 z-30 flex items-center justify-center bg-slate-950/35 backdrop-blur-[2px] p-4"
+                  aria-live="polite"
+                >
+                  <div className="w-full max-w-sm rounded-2xl border-2 border-emerald-400 bg-white p-5 shadow-2xl flex flex-col items-center text-center space-y-3">
+                    <div className="w-full flex items-center justify-between gap-2">
+                      <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-emerald-600 text-white text-[11px] font-bold uppercase tracking-wider">
+                        <Sparkles className="w-3.5 h-3.5" />
+                        <span>Just Checked In</span>
+                      </span>
+
+                      <div className="flex items-center gap-1.5">
+                        {activePopupRank && (
+                          <span className="px-2 py-0.5 rounded-md bg-slate-900 text-white text-xs font-mono-tabular font-bold">
+                            Rank #{activePopupRank}
+                          </span>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => setPopupPinned((p) => !p)}
+                          aria-pressed={popupPinned}
+                          title={popupPinned ? 'Resume auto-hide' : 'Pin photo card'}
+                          className={`min-h-[28px] px-2 rounded-lg border text-xs font-semibold inline-flex items-center gap-1 ${
+                            popupPinned
+                              ? 'border-blue-600 bg-blue-50 text-blue-800'
+                              : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-100'
+                          }`}
+                        >
+                          <Pin className="w-3.5 h-3.5" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setPopupQueue((prev) => prev.slice(1))}
+                          aria-label="Dismiss check-in photo pop-up"
+                          className="min-h-[28px] min-w-[28px] flex items-center justify-center rounded-lg text-slate-500 hover:bg-slate-100 hover:text-slate-900"
+                        >
+                          <X className="w-4 h-4" />
+                        </button>
+                      </div>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() => onPreviewPhoto(activePopup)}
+                      className="w-44 h-44 sm:w-48 sm:h-48 rounded-2xl overflow-hidden border-2 border-emerald-300 bg-slate-100 shadow-md hover:ring-4 hover:ring-emerald-200 transition-all shrink-0"
+                      aria-label={`View photo of ${activePopup.fullName}`}
+                    >
+                      <img
+                        src={activePopup.photoDataUrl}
+                        alt={activePopup.fullName}
+                        className="w-full h-full object-cover"
+                      />
+                    </button>
+
+                    <div className="space-y-0.5 min-w-0 w-full">
+                      <h4 className="text-xl font-display font-extrabold text-slate-900 truncate">
+                        {activePopup.fullName}
+                      </h4>
+                      <p className="text-sm font-medium text-slate-600 truncate">
+                        {activePopup.classDepartment}
+                      </p>
+                    </div>
+
+                    <div className="flex flex-wrap items-center justify-center gap-2">
+                      <span className="px-2.5 py-1 rounded-lg bg-slate-50 border border-slate-200 text-xs font-mono-tabular font-semibold text-slate-800">
+                        {activePopup.checkInTime}
+                      </span>
+                      <span
+                        className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-bold border ${
+                          activePopup.status === 'On Time'
+                            ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
+                            : 'bg-amber-50 text-amber-800 border-amber-200'
+                        }`}
+                      >
+                        {activePopup.status === 'On Time' ? (
+                          <CheckCircle2 className="w-3.5 h-3.5 text-emerald-700" />
+                        ) : (
+                          <Clock className="w-3.5 h-3.5 text-amber-700" />
+                        )}
+                        <span>{activePopup.status}</span>
+                      </span>
+                    </div>
+
+                    {popupQueue.length > 1 && (
+                      <button
+                        type="button"
+                        onClick={() => setPopupQueue((prev) => prev.slice(1))}
+                        className="text-xs font-bold text-blue-700 hover:underline pt-1"
+                      >
+                        Show next check-in ({popupQueue.length - 1} waiting)
+                      </button>
+                    )}
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
           </div>
         </div>
       </div>

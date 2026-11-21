@@ -1787,6 +1787,7 @@ export default function AdminConsole({
             setDashboardVoiceMuted((m) => !m);
           }}
           speakingParticipantName={speakingParticipantName}
+          onSavePublicAppUrl={handleSavePublicAppUrl}
         />
       )}
 

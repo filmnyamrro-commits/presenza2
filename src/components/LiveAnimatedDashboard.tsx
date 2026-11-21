@@ -1,15 +1,19 @@
 import {
+  AlertTriangle,
   Check,
   CheckCircle2,
   ChevronLeft,
   ChevronRight,
   Clock,
   Copy,
+  ExternalLink,
+  Globe,
   Loader2,
   MapPin,
   Maximize2,
   Minimize2,
   Pause,
+  Pin,
   Play,
   QrCode,
   RotateCcw,
@@ -46,7 +50,10 @@ import {
   mergeLiveBoardSettings,
   sortAttendancesChronologically,
 } from '../utils/liveDashboardLayout';
-import { buildCheckInQrUrl } from '../utils/qrUrl';
+import {
+  buildCheckInQrUrl,
+  normalizeAndValidatePublicUrl,
+} from '../utils/qrUrl';
 
 interface LiveAnimatedDashboardProps {
   events: EventRecord[];
@@ -67,6 +74,7 @@ interface LiveAnimatedDashboardProps {
   dashboardVoiceMuted?: boolean;
   onToggleVoiceMute?: () => void;
   speakingParticipantName?: string | null;
+  onSavePublicAppUrl?: (nextUrl: string) => Promise<void>;
 }
 
 const ANIMATION_STYLE_OPTIONS: {
@@ -142,6 +150,7 @@ export default function LiveAnimatedDashboard({
   dashboardVoiceMuted = false,
   onToggleVoiceMute,
   speakingParticipantName,
+  onSavePublicAppUrl,
 }: LiveAnimatedDashboardProps) {
   const prefersReducedMotion = useReducedMotion();
   const [draftSettings, setDraftSettings] = useState<LiveBoardSettings>(() =>
@@ -160,8 +169,23 @@ export default function LiveAnimatedDashboard({
 
   const [showCheckInQr, setShowCheckInQr] = useState(true);
   const [qrZoomOpen, setQrZoomOpen] = useState(false);
+  const [qrOverrideEventId, setQrOverrideEventId] = useState<string>('');
   const [checkInQrDataUrl, setCheckInQrDataUrl] = useState('');
   const [copiedQrLink, setCopiedQrLink] = useState(false);
+  const [publicUrlDraft, setPublicUrlDraft] = useState(
+    () => branding?.publicAppUrl || ''
+  );
+  const [savingPublicUrl, setSavingPublicUrl] = useState(false);
+  const [publicUrlError, setPublicUrlError] = useState<string | null>(null);
+  const [editingPublicUrl, setEditingPublicUrl] = useState(false);
+
+  // Enlarged QR live check-in photo pop-up queue
+  const [zoomPopupQueue, setZoomPopupQueue] = useState<AttendanceRecord[]>([]);
+  const [zoomPopupPinned, setZoomPopupPinned] = useState(false);
+  const [lastZoomArrival, setLastZoomArrival] =
+    useState<AttendanceRecord | null>(null);
+  const zoomBaselineIdsRef = useRef<Set<string>>(new Set());
+  const zoomWasOpenRef = useRef(false);
 
   const rootOverlayRef = useRef<HTMLDivElement | null>(null);
   const gridContainerRef = useRef<HTMLDivElement | null>(null);
@@ -277,12 +301,29 @@ export default function LiveAnimatedDashboard({
     [events, selectedEventFilter]
   );
 
-  // Target event for the displayed participant Check-In QR code:
-  // Uses the selected event, or falls back to the primary active event, or the public check-in root.
-  const qrTargetEvent = useMemo(
-    () => selectedEvent ?? events.find((e) => e.status === 'active') ?? null,
-    [selectedEvent, events]
+  const activeEvents = useMemo(
+    () => events.filter((e) => e.status === 'active'),
+    [events]
   );
+
+  useEffect(() => {
+    setPublicUrlDraft(branding?.publicAppUrl || '');
+  }, [branding?.publicAppUrl]);
+
+  // Target event for the displayed participant Check-In QR code:
+  // Always prefers an active session so scanning never hits a closed-session error.
+  const qrTargetEvent = useMemo(() => {
+    if (selectedEvent && selectedEvent.status === 'active') {
+      return selectedEvent;
+    }
+    if (qrOverrideEventId) {
+      const overrideMatch = activeEvents.find(
+        (e) => e.id === qrOverrideEventId
+      );
+      if (overrideMatch) return overrideMatch;
+    }
+    return activeEvents[0] ?? null;
+  }, [selectedEvent, qrOverrideEventId, activeEvents]);
 
   const { url: checkInQrUrl, resolution: checkInQrResolution } = useMemo(
     () => buildCheckInQrUrl(qrTargetEvent?.id, branding?.publicAppUrl),
@@ -290,6 +331,10 @@ export default function LiveAnimatedDashboard({
   );
 
   useEffect(() => {
+    if (!qrTargetEvent) {
+      setCheckInQrDataUrl('');
+      return;
+    }
     let active = true;
     QRCode.toDataURL(checkInQrUrl, {
       width: 560,
@@ -309,7 +354,29 @@ export default function LiveAnimatedDashboard({
     return () => {
       active = false;
     };
-  }, [checkInQrUrl]);
+  }, [checkInQrUrl, qrTargetEvent]);
+
+  const handleSavePublicUrlSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!onSavePublicAppUrl) return;
+    setPublicUrlError(null);
+    const check = normalizeAndValidatePublicUrl(publicUrlDraft);
+    if (!check.ok) {
+      setPublicUrlError(check.error);
+      return;
+    }
+    setSavingPublicUrl(true);
+    try {
+      await onSavePublicAppUrl(check.origin);
+      setEditingPublicUrl(false);
+    } catch (err) {
+      setPublicUrlError(
+        err instanceof Error ? err.message : 'Unable to save public QR URL.'
+      );
+    } finally {
+      setSavingPublicUrl(false);
+    }
+  };
 
   const handleCopyQrLink = async () => {
     try {
@@ -321,6 +388,73 @@ export default function LiveAnimatedDashboard({
     }
   };
 
+  // Detect new participant check-ins while the QR is enlarged to show their pop-up photo card
+  useEffect(() => {
+    if (!qrZoomOpen) {
+      zoomWasOpenRef.current = false;
+      setZoomPopupQueue([]);
+      setZoomPopupPinned(false);
+      return;
+    }
+
+    if (!zoomWasOpenRef.current) {
+      zoomWasOpenRef.current = true;
+      zoomBaselineIdsRef.current = new Set(attendances.map((a) => a.id));
+      if (
+        latestArrival &&
+        newlyArrivedIds.has(latestArrival.id) &&
+        (selectedEventFilter === 'all' ||
+          latestArrival.eventId === selectedEventFilter)
+      ) {
+        setZoomPopupQueue([latestArrival]);
+        setLastZoomArrival(latestArrival);
+      } else {
+        setZoomPopupQueue([]);
+      }
+      return;
+    }
+
+    const newlyCheckedIn: AttendanceRecord[] = [];
+    for (const rec of attendances) {
+      if (!zoomBaselineIdsRef.current.has(rec.id)) {
+        zoomBaselineIdsRef.current.add(rec.id);
+        if (
+          selectedEventFilter === 'all' ||
+          rec.eventId === selectedEventFilter
+        ) {
+          newlyCheckedIn.push(rec);
+        }
+      }
+    }
+
+    if (newlyCheckedIn.length > 0) {
+      setLastZoomArrival(newlyCheckedIn[newlyCheckedIn.length - 1]);
+      setZoomPopupQueue((prev) => {
+        const existingIds = new Set(prev.map((item) => item.id));
+        const additions = newlyCheckedIn.filter(
+          (item) => !existingIds.has(item.id)
+        );
+        return additions.length > 0 ? [...prev, ...additions] : prev;
+      });
+    }
+  }, [
+    qrZoomOpen,
+    attendances,
+    latestArrival,
+    newlyArrivedIds,
+    selectedEventFilter,
+  ]);
+
+  useEffect(() => {
+    if (!qrZoomOpen || zoomPopupQueue.length === 0 || zoomPopupPinned) {
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      setZoomPopupQueue((prev) => prev.slice(1));
+    }, 8500);
+    return () => window.clearTimeout(timer);
+  }, [qrZoomOpen, zoomPopupQueue, zoomPopupPinned]);
+
   // Filter attendances by selected event and sort strictly chronologically by confirmed serverTimestamp + id tie-breaker
   const rankedAttendances = useMemo(() => {
     const filtered =
@@ -329,6 +463,15 @@ export default function LiveAnimatedDashboard({
         : attendances.filter((a) => a.eventId === selectedEventFilter);
     return sortAttendancesChronologically(filtered);
   }, [attendances, selectedEventFilter]);
+
+  const activeZoomPopup = zoomPopupQueue[0] ?? null;
+  const activeZoomPopupRank = useMemo(() => {
+    if (!activeZoomPopup) return null;
+    const idx = rankedAttendances.findIndex(
+      (r) => r.id === activeZoomPopup.id
+    );
+    return idx >= 0 ? idx + 1 : null;
+  }, [activeZoomPopup, rankedAttendances]);
 
   const counts = useMemo(() => {
     const total = rankedAttendances.length;
@@ -1120,15 +1263,22 @@ export default function LiveAnimatedDashboard({
                 aria-label="Enlarge Participant Check-In QR Code"
                 className="group relative rounded-2xl bg-white p-2 sm:p-2.5 border border-slate-200 shadow-sm hover:ring-2 hover:ring-blue-500 transition-all shrink-0"
               >
-                {checkInQrDataUrl ? (
-                  <img
-                    src={checkInQrDataUrl}
-                    alt={`Participant Check-In QR Code${qrTargetEvent ? ` for ${qrTargetEvent.title}` : ''}`}
-                    className="w-24 h-24 sm:w-28 sm:h-28 lg:w-44 lg:h-44 xl:w-48 xl:h-48 object-contain"
-                  />
+                {qrTargetEvent ? (
+                  checkInQrDataUrl ? (
+                    <img
+                      src={checkInQrDataUrl}
+                      alt={`Participant Check-In QR Code for ${qrTargetEvent.title}`}
+                      className="w-24 h-24 sm:w-28 sm:h-28 lg:w-44 lg:h-44 xl:w-48 xl:h-48 object-contain"
+                    />
+                  ) : (
+                    <div className="w-24 h-24 sm:w-28 sm:h-28 lg:w-44 lg:h-44 xl:w-48 xl:h-48 flex items-center justify-center bg-slate-50 text-xs text-slate-400">
+                      Generating QR...
+                    </div>
+                  )
                 ) : (
-                  <div className="w-24 h-24 sm:w-28 sm:h-28 lg:w-44 lg:h-44 xl:w-48 xl:h-48 flex items-center justify-center bg-slate-50 text-xs text-slate-400">
-                    Generating QR...
+                  <div className="w-24 h-24 sm:w-28 sm:h-28 lg:w-44 lg:h-44 xl:w-48 xl:h-48 flex flex-col items-center justify-center bg-amber-50 text-center p-2 text-[11px] font-semibold text-amber-900">
+                    <AlertTriangle className="w-5 h-5 text-amber-600 mb-1" />
+                    <span>No active session open</span>
                   </div>
                 )}
               </button>
@@ -1144,15 +1294,36 @@ export default function LiveAnimatedDashboard({
                 <div
                   className={`text-xs sm:text-sm font-display font-bold leading-snug line-clamp-2 ${theme.headingText}`}
                 >
-                  {qrTargetEvent ? qrTargetEvent.title : 'Participant Check-In'}
+                  {qrTargetEvent ? qrTargetEvent.title : 'No Active Session Open'}
                 </div>
+                {activeEvents.length > 1 &&
+                  (!selectedEvent || selectedEvent.status !== 'active') && (
+                    <select
+                      value={qrTargetEvent?.id || ''}
+                      onChange={(e) => setQrOverrideEventId(e.target.value)}
+                      aria-label="Select active session for Check-In QR"
+                      className="w-full mt-1 px-2 py-1 text-[11px] font-semibold rounded-lg border border-slate-300 bg-white text-slate-800"
+                    >
+                      {activeEvents.map((ev) => (
+                        <option key={ev.id} value={ev.id}>
+                          {ev.title}
+                        </option>
+                      ))}
+                    </select>
+                  )}
                 <p className={`text-[11px] leading-snug ${theme.mutedText}`}>
-                  No login required · Scan with phone camera to submit photo &amp; attendance
+                  {qrTargetEvent
+                    ? 'No login required · Scan with phone camera to submit photo & attendance'
+                    : 'Open or create an active session in Attendance Console to enable QR check-in.'}
                 </p>
-                {!checkInQrResolution.isPublic && (
-                  <p className="text-[10px] leading-snug rounded-lg border border-amber-300 bg-amber-50 text-amber-900 px-2 py-1 mt-1">
-                    Preview URL only — set Public QR URL in Admin Branding for external phones.
-                  </p>
+                {qrTargetEvent && !checkInQrResolution.isPublic && (
+                  <button
+                    type="button"
+                    onClick={() => setQrZoomOpen(true)}
+                    className="text-[10px] leading-snug rounded-lg border border-amber-300 bg-amber-50 hover:bg-amber-100 text-amber-900 px-2 py-1 mt-1 text-left w-full font-semibold"
+                  >
+                    Preview URL only — click Enlarge QR to set your public Vercel URL for external phones.
+                  </button>
                 )}
               </div>
             </div>
@@ -1172,8 +1343,9 @@ export default function LiveAnimatedDashboard({
               </button>
               <button
                 type="button"
+                disabled={!qrTargetEvent}
                 onClick={() => void handleCopyQrLink()}
-                className={`min-h-[34px] px-3 py-1.5 rounded-xl border text-xs font-semibold inline-flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap ${
+                className={`min-h-[34px] px-3 py-1.5 rounded-xl border text-xs font-semibold inline-flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap disabled:opacity-50 ${
                   theme.isDark
                     ? 'border-slate-700 bg-slate-800/90 text-slate-100 hover:bg-slate-700'
                     : 'border-slate-300 bg-white text-slate-800 hover:bg-slate-100'
@@ -1496,90 +1668,400 @@ export default function LiveAnimatedDashboard({
         </footer>
       )}
 
-      {/* Enlarged QR Code Lightbox for Large Auditoriums / Projectors */}
+      {/* Enlarged QR Code Lightbox with Live Newly Checked-In Participant Photo Pop-Up */}
       {qrZoomOpen && (
         <div
-          className="fixed inset-0 z-[80] flex items-center justify-center bg-slate-950/75 backdrop-blur-sm p-4"
+          className="fixed inset-0 z-[80] flex items-center justify-center bg-slate-950/80 backdrop-blur-sm p-3 sm:p-5"
           role="dialog"
           aria-modal="true"
           aria-labelledby="live-board-qr-zoom-title"
           onClick={() => setQrZoomOpen(false)}
         >
           <div
-            className="w-full max-w-md rounded-2xl bg-white border border-slate-200 shadow-2xl p-6 text-center space-y-4"
+            className={`w-full rounded-2xl bg-white border border-slate-200 shadow-2xl p-5 sm:p-6 transition-all duration-300 max-h-[94vh] overflow-y-auto ${
+              activeZoomPopup ? 'max-w-4xl' : 'max-w-lg'
+            }`}
             onClick={(e) => e.stopPropagation()}
           >
-            <div className="flex items-start justify-between gap-3">
+            {/* Lightbox Header */}
+            <div className="flex items-start justify-between gap-3 pb-4 border-b border-slate-100">
               <div className="text-left min-w-0">
                 <div className="text-[11px] font-bold uppercase tracking-wider text-blue-700">
                   Participant Check-In QR · No Login Required
                 </div>
                 <h3
                   id="live-board-qr-zoom-title"
-                  className="text-lg font-display font-bold text-slate-900 truncate"
+                  className="text-lg sm:text-xl font-display font-bold text-slate-900 truncate"
                 >
-                  {qrTargetEvent ? qrTargetEvent.title : 'Participant Check-In'}
+                  {qrTargetEvent ? qrTargetEvent.title : 'No Active Session Open'}
                 </h3>
               </div>
-              <button
-                type="button"
-                onClick={() => setQrZoomOpen(false)}
-                className="min-h-[38px] min-w-[38px] flex items-center justify-center rounded-lg text-slate-500 hover:bg-slate-100 hover:text-slate-900"
-                aria-label="Close enlarged QR code"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
 
-            <div className="mx-auto inline-block rounded-2xl border border-slate-200 bg-white p-4 shadow-xs">
-              {checkInQrDataUrl ? (
-                <img
-                  src={checkInQrDataUrl}
-                  alt={`Enlarged Check-In QR Code${qrTargetEvent ? ` for ${qrTargetEvent.title}` : ''}`}
-                  className="w-64 h-64 sm:w-72 sm:h-72 object-contain"
-                />
-              ) : (
-                <div className="w-64 h-64 flex items-center justify-center text-xs text-slate-400">
-                  Generating QR code...
-                </div>
-              )}
-            </div>
+              <div className="flex items-center gap-2 shrink-0">
+                {activeEvents.length > 1 &&
+                  (!selectedEvent || selectedEvent.status !== 'active') && (
+                    <select
+                      value={qrTargetEvent?.id || ''}
+                      onChange={(e) => setQrOverrideEventId(e.target.value)}
+                      aria-label="Select active session for enlarged QR"
+                      className="min-h-[36px] max-w-[180px] px-2.5 py-1 text-xs font-semibold rounded-lg border border-slate-300 bg-slate-50 text-slate-800"
+                    >
+                      {activeEvents.map((ev) => (
+                        <option key={ev.id} value={ev.id}>
+                          {ev.title}
+                        </option>
+                      ))}
+                    </select>
+                  )}
 
-            <p className="text-xs text-slate-600 leading-relaxed">
-              Scan with any Android, iPhone, or iPad camera to open the check-in form immediately.
-            </p>
-
-            {!checkInQrResolution.isPublic && (
-              <div className="rounded-xl border border-amber-300 bg-amber-50 px-3 py-2 text-left text-[11px] text-amber-950">
-                <strong>Private Preview Notice:</strong> {checkInQrResolution.warning}
+                <button
+                  type="button"
+                  onClick={() => setQrZoomOpen(false)}
+                  className="min-h-[38px] min-w-[38px] flex items-center justify-center rounded-lg text-slate-500 hover:bg-slate-100 hover:text-slate-900"
+                  aria-label="Close enlarged QR code"
+                >
+                  <X className="w-5 h-5" />
+                </button>
               </div>
-            )}
+            </div>
 
-            <div className="flex items-center gap-2">
-              <input
-                type="text"
-                readOnly
-                value={checkInQrUrl}
-                aria-label="Participant Check-In URL"
-                className="flex-1 min-w-0 px-3 py-2 text-xs font-mono-tabular bg-slate-50 border border-slate-200 rounded-xl text-slate-700"
-              />
-              <button
-                type="button"
-                onClick={() => void handleCopyQrLink()}
-                className="min-h-[38px] px-3.5 py-1.5 rounded-xl bg-blue-700 hover:bg-blue-800 text-white text-xs font-semibold inline-flex items-center gap-1.5 shrink-0"
+            {/* Body: Split when a newly checked-in participant pop-up photo is active */}
+            <div
+              className={`pt-5 grid gap-6 items-center ${
+                activeZoomPopup
+                  ? 'grid-cols-1 md:grid-cols-12'
+                  : 'grid-cols-1'
+              }`}
+            >
+              {/* QR Column (always visible & scannable) */}
+              <div
+                className={`text-center space-y-4 ${
+                  activeZoomPopup ? 'md:col-span-6' : ''
+                }`}
               >
-                {copiedQrLink ? (
-                  <>
-                    <Check className="w-3.5 h-3.5" />
-                    <span>Copied</span>
-                  </>
-                ) : (
-                  <>
-                    <Copy className="w-3.5 h-3.5" />
-                    <span>Copy</span>
-                  </>
+                <div className="mx-auto inline-block rounded-2xl border border-slate-200 bg-white p-4 shadow-xs">
+                  {qrTargetEvent ? (
+                    checkInQrDataUrl ? (
+                      <img
+                        src={checkInQrDataUrl}
+                        alt={`Enlarged Check-In QR Code for ${qrTargetEvent.title}`}
+                        className="w-60 h-60 sm:w-72 sm:h-72 object-contain"
+                      />
+                    ) : (
+                      <div className="w-60 h-60 sm:w-72 sm:h-72 flex items-center justify-center text-xs text-slate-400">
+                        Generating QR code...
+                      </div>
+                    )
+                  ) : (
+                    <div className="w-60 h-60 sm:w-72 sm:h-72 flex flex-col items-center justify-center text-center p-4 bg-amber-50 rounded-xl">
+                      <AlertTriangle className="w-8 h-8 text-amber-600 mb-2" />
+                      <p className="text-sm font-bold text-amber-950">
+                        No Active Session Open
+                      </p>
+                      <p className="text-xs text-amber-800 mt-1">
+                        Create or reopen an active event session before sharing the check-in QR code.
+                      </p>
+                    </div>
+                  )}
+                </div>
+
+                <p className="text-xs text-slate-600 leading-relaxed max-w-sm mx-auto">
+                  Scan with any Android, iPhone, or iPad camera to open the check-in form immediately.
+                </p>
+
+                {/* Public QR URL Status & Inline Setup */}
+                {qrTargetEvent && !checkInQrResolution.isPublic && (
+                  <div
+                    role="alert"
+                    className="rounded-xl border border-amber-300 bg-amber-50 p-3 text-left text-xs text-amber-950 space-y-2"
+                  >
+                    <div className="flex items-start gap-2">
+                      <AlertTriangle className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
+                      <div className="leading-relaxed">
+                        <strong>Private Preview URL: </strong>
+                        <span>{checkInQrResolution.warning}</span>
+                      </div>
+                    </div>
+                    {onSavePublicAppUrl && (
+                      <form
+                        onSubmit={(e) => void handleSavePublicUrlSubmit(e)}
+                        className="flex flex-col sm:flex-row gap-1.5"
+                      >
+                        <input
+                          type="url"
+                          value={publicUrlDraft}
+                          onChange={(e) => setPublicUrlDraft(e.target.value)}
+                          placeholder="https://your-app.vercel.app"
+                          aria-label="Public Vercel production URL for QR codes"
+                          className="flex-1 min-w-0 min-h-[36px] px-2.5 py-1 text-xs font-mono-tabular bg-white border border-amber-300 rounded-lg text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-600"
+                        />
+                        <button
+                          type="submit"
+                          disabled={savingPublicUrl}
+                          className="min-h-[36px] px-3 py-1 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold whitespace-nowrap disabled:opacity-50"
+                        >
+                          {savingPublicUrl ? 'Saving...' : 'Save Public URL'}
+                        </button>
+                      </form>
+                    )}
+                    {publicUrlError && (
+                      <p className="text-[11px] text-rose-700 font-medium">
+                        {publicUrlError}
+                      </p>
+                    )}
+                  </div>
                 )}
-              </button>
+
+                {qrTargetEvent && checkInQrResolution.isPublic && (
+                  <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-left space-y-1.5">
+                    <div className="flex items-center justify-between gap-2 text-[11px] text-emerald-800">
+                      <span className="inline-flex items-center gap-1.5 font-medium truncate">
+                        <Globe className="w-3.5 h-3.5 text-emerald-700 shrink-0" />
+                        <span className="truncate">
+                          Public QR Host:{' '}
+                          <strong className="font-mono-tabular">
+                            {checkInQrResolution.origin}
+                          </strong>
+                        </span>
+                      </span>
+                      {onSavePublicAppUrl && (
+                        <button
+                          type="button"
+                          onClick={() => setEditingPublicUrl((v) => !v)}
+                          className="text-emerald-900 font-semibold hover:underline shrink-0"
+                        >
+                          {editingPublicUrl ? 'Cancel' : 'Change'}
+                        </button>
+                      )}
+                    </div>
+                    {editingPublicUrl && onSavePublicAppUrl && (
+                      <form
+                        onSubmit={(e) => void handleSavePublicUrlSubmit(e)}
+                        className="flex items-center gap-1.5 pt-1"
+                      >
+                        <input
+                          type="url"
+                          value={publicUrlDraft}
+                          onChange={(e) => setPublicUrlDraft(e.target.value)}
+                          placeholder="https://your-app.vercel.app (blank for auto)"
+                          aria-label="Edit public QR domain URL"
+                          className="flex-1 min-w-0 min-h-[34px] px-2.5 py-1 text-xs font-mono-tabular bg-white border border-emerald-300 rounded-lg text-slate-900"
+                        />
+                        <button
+                          type="submit"
+                          disabled={savingPublicUrl}
+                          className="min-h-[34px] px-3 py-1 rounded-lg bg-blue-700 hover:bg-blue-800 text-white text-xs font-semibold whitespace-nowrap disabled:opacity-50"
+                        >
+                          {savingPublicUrl ? 'Saving...' : 'Save'}
+                        </button>
+                      </form>
+                    )}
+                    {publicUrlError && (
+                      <p className="text-[11px] text-rose-700 font-medium">
+                        {publicUrlError}
+                      </p>
+                    )}
+                  </div>
+                )}
+
+                {qrTargetEvent && (
+                  <div className="flex flex-wrap items-center gap-2">
+                    <input
+                      type="text"
+                      readOnly
+                      value={checkInQrUrl}
+                      aria-label="Participant Check-In URL"
+                      className="flex-1 min-w-[180px] px-3 py-2 text-xs font-mono-tabular bg-slate-50 border border-slate-200 rounded-xl text-slate-700"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => void handleCopyQrLink()}
+                      className="min-h-[38px] px-3.5 py-1.5 rounded-xl bg-blue-700 hover:bg-blue-800 text-white text-xs font-semibold inline-flex items-center gap-1.5 shrink-0"
+                    >
+                      {copiedQrLink ? (
+                        <>
+                          <Check className="w-3.5 h-3.5" />
+                          <span>Copied</span>
+                        </>
+                      ) : (
+                        <>
+                          <Copy className="w-3.5 h-3.5" />
+                          <span>Copy</span>
+                        </>
+                      )}
+                    </button>
+                    <a
+                      href={checkInQrUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="min-h-[38px] px-3 py-1.5 rounded-xl border border-slate-300 bg-white hover:bg-slate-100 text-slate-800 text-xs font-semibold inline-flex items-center gap-1.5 shrink-0"
+                    >
+                      <ExternalLink className="w-3.5 h-3.5" />
+                      <span>Test Link</span>
+                    </a>
+                  </div>
+                )}
+
+                {!activeZoomPopup && lastZoomArrival && (
+                  <div className="pt-2 border-t border-slate-100 flex items-center justify-between gap-2 text-xs text-slate-600">
+                    <span className="truncate">
+                      Last check-in:{' '}
+                      <strong className="text-slate-900">
+                        {lastZoomArrival.fullName}
+                      </strong>{' '}
+                      · {lastZoomArrival.checkInTime}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setZoomPopupQueue([lastZoomArrival])}
+                      className="text-blue-700 hover:underline font-semibold shrink-0"
+                    >
+                      Show Photo Pop-Up
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              {/* Pop-Up Photo Card for Participant Who Just Checked In */}
+              <AnimatePresence mode="wait">
+                {activeZoomPopup && (
+                  <motion.div
+                    key={`zoom-popup-${activeZoomPopup.id}`}
+                    initial={
+                      animationsDisabled
+                        ? false
+                        : { opacity: 0, scale: 0.88, y: 16 }
+                    }
+                    animate={{ opacity: 1, scale: 1, y: 0 }}
+                    exit={
+                      animationsDisabled
+                        ? undefined
+                        : { opacity: 0, scale: 0.92, y: -12 }
+                    }
+                    transition={{
+                      type: 'spring',
+                      stiffness: 320,
+                      damping: 22,
+                    }}
+                    className="md:col-span-6 rounded-2xl border-2 border-emerald-400 bg-gradient-to-b from-emerald-50/90 via-white to-slate-50 p-5 shadow-xl flex flex-col items-center text-center space-y-3.5"
+                    aria-live="polite"
+                  >
+                    <div className="w-full flex items-center justify-between gap-2">
+                      <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-emerald-600 text-white text-[11px] font-bold uppercase tracking-wider">
+                        <Sparkles className="w-3.5 h-3.5" />
+                        <span>Just Checked In</span>
+                      </span>
+
+                      <div className="flex items-center gap-1.5">
+                        {activeZoomPopupRank && (
+                          <span className="px-2 py-0.5 rounded-md bg-slate-900 text-white text-xs font-mono-tabular font-bold">
+                            Rank #{activeZoomPopupRank}
+                          </span>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => setZoomPopupPinned((p) => !p)}
+                          title={
+                            zoomPopupPinned
+                              ? 'Resume auto-hide'
+                              : 'Pin photo card on screen'
+                          }
+                          aria-pressed={zoomPopupPinned}
+                          className={`min-h-[30px] min-w-[30px] px-2 rounded-lg border text-xs font-semibold inline-flex items-center gap-1 ${
+                            zoomPopupPinned
+                              ? 'border-blue-600 bg-blue-50 text-blue-800'
+                              : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-100'
+                          }`}
+                        >
+                          <Pin className="w-3.5 h-3.5" />
+                          <span className="hidden sm:inline">
+                            {zoomPopupPinned ? 'Pinned' : 'Pin'}
+                          </span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setZoomPopupQueue((prev) => prev.slice(1))
+                          }
+                          aria-label="Dismiss check-in photo pop-up"
+                          className="min-h-[30px] min-w-[30px] flex items-center justify-center rounded-lg text-slate-500 hover:bg-slate-100 hover:text-slate-900"
+                        >
+                          <X className="w-4 h-4" />
+                        </button>
+                      </div>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() => onPreviewPhoto(activeZoomPopup)}
+                      className="w-48 h-48 sm:w-56 sm:h-56 rounded-2xl overflow-hidden border-2 border-emerald-300 bg-white shadow-md hover:ring-4 hover:ring-emerald-200 transition-all shrink-0"
+                      aria-label={`Enlarge photo of ${activeZoomPopup.fullName}`}
+                    >
+                      <img
+                        src={activeZoomPopup.photoDataUrl}
+                        alt={activeZoomPopup.fullName}
+                        className="w-full h-full object-cover"
+                      />
+                    </button>
+
+                    <div className="space-y-1 min-w-0 w-full">
+                      <h4 className="text-xl sm:text-2xl font-display font-extrabold text-slate-900 truncate">
+                        {activeZoomPopup.fullName}
+                      </h4>
+                      <p className="text-sm font-medium text-slate-600 truncate">
+                        {activeZoomPopup.classDepartment}
+                      </p>
+                      <p className="text-xs text-slate-500 truncate">
+                        {activeZoomPopup.eventName}
+                      </p>
+                    </div>
+
+                    <div className="flex flex-wrap items-center justify-center gap-2 pt-1">
+                      <span className="px-3 py-1 rounded-lg bg-white border border-slate-200 text-xs font-mono-tabular font-semibold text-slate-800">
+                        {activeZoomPopup.checkInTime}
+                      </span>
+                      <span
+                        className={`inline-flex items-center gap-1 px-3 py-1 rounded-lg text-xs font-bold border ${
+                          activeZoomPopup.status === 'On Time'
+                            ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
+                            : 'bg-amber-50 text-amber-800 border-amber-200'
+                        }`}
+                      >
+                        {activeZoomPopup.status === 'On Time' ? (
+                          <CheckCircle2 className="w-3.5 h-3.5 text-emerald-700" />
+                        ) : (
+                          <Clock className="w-3.5 h-3.5 text-amber-700" />
+                        )}
+                        <span>{activeZoomPopup.status}</span>
+                      </span>
+                    </div>
+
+                    {activeZoomPopup.status === 'Late' &&
+                      activeZoomPopup.lateExcuse && (
+                        <p className="text-xs text-amber-900 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2 w-full line-clamp-2">
+                          Excuse: {activeZoomPopup.lateExcuse}
+                        </p>
+                      )}
+
+                    {zoomPopupQueue.length > 1 && (
+                      <div className="w-full pt-2 border-t border-emerald-100 flex items-center justify-between text-xs text-emerald-900">
+                        <span>
+                          +{zoomPopupQueue.length - 1} more check-in waiting
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setZoomPopupQueue((prev) => prev.slice(1))
+                          }
+                          className="font-bold text-blue-700 hover:underline"
+                        >
+                          Show Next
+                        </button>
+                      </div>
+                    )}
+                  </motion.div>
+                )}
+              </AnimatePresence>
             </div>
           </div>
         </div>

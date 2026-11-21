@@ -75,9 +75,27 @@ export default function App() {
   const [user, setUser] = useState<User | null>(null);
   const [authReady, setAuthReady] = useState(false);
   const [branding, setBranding] = useState<OrganizationBranding | null>(null);
+  const [serverPublicAppUrl, setServerPublicAppUrl] = useState('');
 
   // When a participant enters via QR link (/?event=<id> or /?view=feedback&event=<id>), hide Admin menu controls
   const isQrParticipantView = Boolean(requestedEventId);
+
+  useEffect(() => {
+    let active = true;
+    fetch('/api/public/config')
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data: { publicAppUrl?: string } | null) => {
+        if (active && data && typeof data.publicAppUrl === 'string' && data.publicAppUrl.trim()) {
+          setServerPublicAppUrl(data.publicAppUrl.trim());
+        }
+      })
+      .catch(() => {
+        // Ignore when static hosting does not expose /api/public/config
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
@@ -115,6 +133,15 @@ export default function App() {
     );
     return () => unsubscribe();
   }, []);
+
+  const effectiveBranding: OrganizationBranding | null =
+    branding || serverPublicAppUrl
+      ? {
+          organizationName: branding?.organizationName || '',
+          logoDataUrl: branding?.logoDataUrl || '',
+          publicAppUrl: branding?.publicAppUrl || serverPublicAppUrl || '',
+        }
+      : null;
 
   useEffect(() => {
     const syncFromLocation = () => {
@@ -403,7 +430,7 @@ export default function App() {
             <AdminConsole
               user={user}
               authReady={authReady}
-              branding={branding}
+              branding={effectiveBranding}
               activeSection={adminSection}
               onChangeSection={(sec) => {
                 setAdminSection(sec);
