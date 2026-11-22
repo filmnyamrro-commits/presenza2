@@ -1575,13 +1575,13 @@ export default function AdminConsole({
     );
   }
 
-  // Not signed in -> Administrator Login Screen
+  // Not signed in -> Welcome to PRESENZA Sign-In Screen
   if (!user) {
     return (
       <div className="relative isolate min-h-[calc(100vh-10rem)] flex items-center justify-center">
         {adminNativeLogoBackdrop}
         <div className="relative z-10 w-full max-w-lg mx-auto px-4 py-10 sm:py-14">
-          <div className="bg-white/90 backdrop-blur-xs border border-slate-200 rounded-2xl p-6 sm:p-8 text-center space-y-5 shadow-sm">
+          <div className="bg-white/95 backdrop-blur-xs border border-slate-200 rounded-2xl p-6 sm:p-8 text-center space-y-5 shadow-sm">
             <div className="flex flex-col items-center gap-3">
               <img
                 src={PRESENZA_NATIVE_LOGO_URL}
@@ -1589,12 +1589,18 @@ export default function AdminConsole({
                 className="h-24 sm:h-28 w-auto object-contain mix-blend-multiply"
               />
             </div>
-            <div>
-              <h1 className="text-2xl font-bold text-slate-900">
-                Administrator Sign In
+            <div className="space-y-2">
+              <p className="inline-flex items-center justify-center gap-1.5 text-xs font-medium text-slate-500">
+                <Lock className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                <span>Sign-In Mode</span>
+                <span aria-hidden="true">·</span>
+                <span>Administrator &amp; Teacher Access</span>
+              </p>
+              <h1 className="font-display text-2xl sm:text-3xl font-bold tracking-tight text-slate-900">
+                Welcome to PRESENZA
               </h1>
-              <p className="mt-2 text-sm text-slate-600 leading-relaxed">
-                Sign in with an authorized teacher or administrator Google account. Participants check in directly via the attendance link or QR code without logging in.
+              <p className="text-sm text-slate-600 leading-relaxed">
+                Check-In, Feedback &amp; Evaluation, and Certificates are locked until you sign in with an authorized Google account. Attendees can still open event QR links directly without logging in.
               </p>
             </div>
 
