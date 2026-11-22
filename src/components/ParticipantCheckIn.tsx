@@ -64,6 +64,7 @@ interface ParticipantCheckInProps {
 }
 
 const CHECKIN_DEDUPE_STORAGE_KEY = 'presenza_checkin_receipts_v1';
+const ACTIVE_CHECKIN_POINTER_KEY = 'presenza_active_checkin_pointer_v1';
 
 function buildParticipantDedupeKey(
   eventId: string,
@@ -87,20 +88,109 @@ function readSavedReceiptByKey(dedupeKey: string): CheckInReceipt | null {
 }
 
 function saveReceiptForDedupe(dedupeKey: string, receipt: CheckInReceipt): void {
-  try {
+  const writeMap = (entryReceipt: CheckInReceipt) => {
     const raw = window.localStorage.getItem(CHECKIN_DEDUPE_STORAGE_KEY);
     const map: Record<string, CheckInReceipt> = raw ? JSON.parse(raw) : {};
-    map[dedupeKey] = receipt;
+    map[dedupeKey] = entryReceipt;
     // Keep at most 20 recent receipts on device to stay well under storage quota
     const entries = Object.entries(map);
-    if (entries.length > 20) {
-      const trimmed = Object.fromEntries(entries.slice(entries.length - 20));
-      window.localStorage.setItem(CHECKIN_DEDUPE_STORAGE_KEY, JSON.stringify(trimmed));
-    } else {
-      window.localStorage.setItem(CHECKIN_DEDUPE_STORAGE_KEY, JSON.stringify(map));
+    const trimmed =
+      entries.length > 20
+        ? Object.fromEntries(entries.slice(entries.length - 20))
+        : map;
+    window.localStorage.setItem(
+      CHECKIN_DEDUPE_STORAGE_KEY,
+      JSON.stringify(trimmed)
+    );
+  };
+
+  try {
+    writeMap(receipt);
+  } catch {
+    // Fallback without photo bytes if browser storage quota is nearly full
+    try {
+      writeMap({ ...receipt, photoDataUrl: '' });
+    } catch {
+      // Ignore storage quota restrictions cleanly
     }
+  }
+}
+
+function saveActiveReceiptForEvent(
+  eventId: string,
+  dedupeKey: string,
+  receipt: CheckInReceipt
+): void {
+  try {
+    const raw = window.localStorage.getItem(ACTIVE_CHECKIN_POINTER_KEY);
+    const map: Record<string, string> = raw ? JSON.parse(raw) : {};
+    map[eventId] = dedupeKey;
+    window.localStorage.setItem(ACTIVE_CHECKIN_POINTER_KEY, JSON.stringify(map));
   } catch {
     // Ignore storage quota restrictions cleanly
+  }
+  try {
+    window.sessionStorage.setItem(
+      `presenza_session_receipt_${eventId}`,
+      JSON.stringify(receipt)
+    );
+  } catch {
+    // Ignore sessionStorage restrictions cleanly
+  }
+}
+
+function readActiveReceiptForEvent(eventId: string): CheckInReceipt | null {
+  try {
+    const sessionRaw = window.sessionStorage.getItem(
+      `presenza_session_receipt_${eventId}`
+    );
+    if (sessionRaw) {
+      const parsed = JSON.parse(sessionRaw) as CheckInReceipt;
+      if (parsed && parsed.eventId === eventId) return parsed;
+    }
+  } catch {
+    // Ignore sessionStorage read issues
+  }
+  try {
+    const raw = window.localStorage.getItem(ACTIVE_CHECKIN_POINTER_KEY);
+    if (!raw) return null;
+    const map = JSON.parse(raw) as Record<string, string>;
+    const dedupeKey = map[eventId];
+    if (!dedupeKey) return null;
+    return readSavedReceiptByKey(dedupeKey);
+  } catch {
+    return null;
+  }
+}
+
+function clearActiveReceiptForEvent(eventId: string): void {
+  try {
+    const raw = window.localStorage.getItem(ACTIVE_CHECKIN_POINTER_KEY);
+    if (raw) {
+      const map = JSON.parse(raw) as Record<string, string>;
+      delete map[eventId];
+      window.localStorage.setItem(
+        ACTIVE_CHECKIN_POINTER_KEY,
+        JSON.stringify(map)
+      );
+    }
+  } catch {
+    // Ignore storage restrictions
+  }
+  try {
+    window.sessionStorage.removeItem(`presenza_session_receipt_${eventId}`);
+  } catch {
+    // Ignore sessionStorage restrictions
+  }
+}
+
+function hasSubmittedFeedbackForEvent(eventId: string): boolean {
+  try {
+    return Boolean(
+      window.localStorage.getItem(`presenza_feedback_submitted_${eventId}`)
+    );
+  } catch {
+    return false;
   }
 }
 
@@ -140,7 +230,9 @@ export default function ParticipantCheckIn({
   const [formDiagnostic, setFormDiagnostic] =
     useState<DiagnosticErrorDetails | null>(null);
   const [duplicateReceipt, setDuplicateReceipt] = useState<CheckInReceipt | null>(null);
-  const [receipt, setReceipt] = useState<CheckInReceipt | null>(null);
+  const [receipt, setReceipt] = useState<CheckInReceipt | null>(() =>
+    requestedEventId ? readActiveReceiptForEvent(requestedEventId) : null
+  );
 
   // Voice announcement settings
   const [voiceSettings, setVoiceSettings] =
@@ -326,6 +418,17 @@ export default function ParticipantCheckIn({
       cancelled = true;
     };
   }, [requestedEventId, activeEvents, loadingEvents]);
+
+  // Restore saved check-in confirmation notification when participant returns to Check-In
+  const activeTargetEventId = selectedEvent?.id || requestedEventId || null;
+  useEffect(() => {
+    if (!activeTargetEventId) {
+      setReceipt(null);
+      return;
+    }
+    const saved = readActiveReceiptForEvent(activeTargetEventId);
+    setReceipt(saved);
+  }, [activeTargetEventId]);
 
   // Camera stream lifecycle
   const stopCameraStream = () => {
@@ -688,6 +791,7 @@ export default function ParticipantCheckIn({
         };
 
         saveReceiptForDedupe(dedupeKey, nextReceipt);
+        saveActiveReceiptForEvent(selectedEvent.id, dedupeKey, nextReceipt);
 
         try {
           window.localStorage.setItem(
@@ -755,6 +859,10 @@ export default function ParticipantCheckIn({
   };
 
   const handleResetForNext = () => {
+    const targetId = receipt?.eventId || selectedEvent?.id || requestedEventId;
+    if (targetId) {
+      clearActiveReceiptForEvent(targetId);
+    }
     setReceipt(null);
     setDuplicateReceipt(null);
     setFullName('');
@@ -770,6 +878,8 @@ export default function ParticipantCheckIn({
 
   // Confirmation Receipt Screen
   if (receipt) {
+    const feedbackAlreadyDone = hasSubmittedFeedbackForEvent(receipt.eventId);
+
     return (
       <div className="max-w-3xl mx-auto px-4 sm:px-6 py-8 sm:py-12">
         <div className="bg-white border border-slate-200 rounded-2xl overflow-hidden">
@@ -780,10 +890,10 @@ export default function ParticipantCheckIn({
               </div>
               <div>
                 <h1 className="text-xl sm:text-2xl font-bold text-slate-900">
-                  Attendance Recorded
+                  Check-In Successful · Attendance Recorded
                 </h1>
                 <p className="text-sm text-slate-600 mt-0.5">
-                  Thank you, {receipt.fullName}. Your check-in has been saved with a verified server timestamp.
+                  Thank you, {receipt.fullName}. Your attendance for this session has already been saved with a verified server timestamp.
                 </p>
               </div>
             </div>
@@ -806,12 +916,21 @@ export default function ParticipantCheckIn({
 
           <div className="p-6 sm:p-8 grid grid-cols-1 sm:grid-cols-12 gap-6 items-start">
             <div className="sm:col-span-4">
-              <div className="aspect-square rounded-xl overflow-hidden border border-slate-200 bg-slate-100">
-                <img
-                  src={receipt.photoDataUrl}
-                  alt={`${receipt.fullName} check-in verification`}
-                  className="w-full h-full object-cover"
-                />
+              <div className="aspect-square rounded-xl overflow-hidden border border-slate-200 bg-slate-100 flex items-center justify-center">
+                {receipt.photoDataUrl ? (
+                  <img
+                    src={receipt.photoDataUrl}
+                    alt={`${receipt.fullName} check-in verification`}
+                    className="w-full h-full object-cover"
+                  />
+                ) : (
+                  <div className="flex flex-col items-center justify-center gap-2 text-emerald-700 p-4 text-center">
+                    <UserCheck className="w-10 h-10" />
+                    <span className="text-xs font-semibold text-slate-600">
+                      Verification Photo Recorded
+                    </span>
+                  </div>
+                )}
               </div>
               <p className="text-xs text-slate-500 mt-2 text-center">
                 Photo consent recorded
@@ -918,7 +1037,11 @@ export default function ParticipantCheckIn({
                   className="min-h-[44px] px-4 py-2.5 rounded-xl bg-blue-700 hover:bg-blue-800 text-white text-sm font-semibold transition-colors flex items-center justify-center gap-2 whitespace-nowrap"
                 >
                   <MessageSquare className="w-4 h-4" />
-                  <span>Give Session Feedback</span>
+                  <span>
+                    {feedbackAlreadyDone
+                      ? 'View Feedback Confirmation'
+                      : 'Give Session Feedback'}
+                  </span>
                 </button>
               )}
               <button
