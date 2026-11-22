@@ -1915,7 +1915,8 @@ export default function AdminConsole({
     <div className="relative min-h-[calc(100vh-10rem)]">
       {adminNativeLogoBackdrop}
       <div className="relative z-10 max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 sm:py-8 space-y-8">
-      {/* Top Admin Header */}
+      {/* Top Admin Header (shown only on Admin Console views, omitted from Certificates & Recognition) */}
+      {currentSection !== 'certificates' && (
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-6 border-b border-slate-200">
         <div>
           <h1 className="text-2xl sm:text-3xl font-bold text-slate-900 tracking-tight">
@@ -1996,6 +1997,7 @@ export default function AdminConsole({
           </button>
         </div>
       </div>
+      )}
 
       {/* Admin Module Switcher Tabs */}
       <nav
