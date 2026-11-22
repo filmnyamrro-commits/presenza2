@@ -5,13 +5,19 @@ import {
   CheckCircle2,
   CheckSquare,
   Clock,
+  FileText,
+  Film,
+  Image as ImageIcon,
   Loader2,
   MapPin,
   MessageSquare,
+  Paperclip,
   Send,
   Sparkles,
   Square,
   Star,
+  Trash2,
+  Upload,
   UserCheck,
   Users,
 } from 'lucide-react';
@@ -26,7 +32,7 @@ import {
   setDoc,
   where,
 } from 'firebase/firestore';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   db,
   extractFirebaseErrorDetails,
@@ -43,6 +49,12 @@ import {
   OperationType,
 } from '../types';
 import { formatLocalDateYmd, generateSafeId } from '../utils/dateTime';
+import {
+  formatAttachmentBytes,
+  prepareFeedbackAttachment,
+  uploadFeedbackAttachment,
+  type PreparedFeedbackAttachment,
+} from '../utils/feedbackAttachment';
 import {
   evaluateFeedbackSchedule,
   formatScheduleCountdown,
@@ -74,6 +86,7 @@ interface StoredFeedbackReceipt {
   averageRating: number;
   submittedAtIso: string;
   selectedCount: number;
+  attachmentName?: string;
 }
 
 const STAR_LABELS: Record<number, string> = {
@@ -138,6 +151,15 @@ export default function ParticipantFeedback({
   const [participantName, setParticipantName] = useState('');
   const [participantDepartment, setParticipantDepartment] = useState('');
   const [linkedAttendanceId, setLinkedAttendanceId] = useState('');
+
+  // Attachment state (PDF, JPEG photo, or MP4/MOV video)
+  const [preparedAttachment, setPreparedAttachment] =
+    useState<PreparedFeedbackAttachment | null>(null);
+  const [preparingAttachment, setPreparingAttachment] = useState(false);
+  const [attachmentError, setAttachmentError] = useState<string | null>(null);
+  const [showInlinePdfPreview, setShowInlinePdfPreview] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState<number | null>(null);
+  const attachmentInputRef = useRef<HTMLInputElement | null>(null);
 
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
@@ -300,6 +322,15 @@ export default function ParticipantFeedback({
     setSelectedStatementIds(new Set());
     setWrittenComment('');
     setCustomAnswersMap({});
+    setAttachmentError(null);
+    setUploadProgress(null);
+    setShowInlinePdfPreview(false);
+    setPreparedAttachment((prev) => {
+      if (prev?.previewUrl?.startsWith('blob:')) {
+        URL.revokeObjectURL(prev.previewUrl);
+      }
+      return null;
+    });
 
     const priorReceipt = readFeedbackReceipt(eventId);
     setSubmittedReceipt(priorReceipt);
@@ -414,6 +445,46 @@ export default function ParticipantFeedback({
     };
   }, [activeCriteria, ratingsMap]);
 
+  const clearAttachment = () => {
+    setAttachmentError(null);
+    setShowInlinePdfPreview(false);
+    setPreparedAttachment((prev) => {
+      if (prev?.previewUrl?.startsWith('blob:')) {
+        URL.revokeObjectURL(prev.previewUrl);
+      }
+      return null;
+    });
+  };
+
+  const handleAttachmentFileChange = async (
+    e: React.ChangeEvent<HTMLInputElement>
+  ) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    setAttachmentError(null);
+    setFormError(null);
+    setShowInlinePdfPreview(false);
+    setPreparingAttachment(true);
+    try {
+      const prepared = await prepareFeedbackAttachment(file);
+      setPreparedAttachment((prev) => {
+        if (prev?.previewUrl?.startsWith('blob:')) {
+          URL.revokeObjectURL(prev.previewUrl);
+        }
+        return prepared;
+      });
+    } catch (err) {
+      setAttachmentError(
+        err instanceof Error
+          ? err.message
+          : 'Unable to prepare the selected document or media file.'
+      );
+    } finally {
+      setPreparingAttachment(false);
+    }
+  };
+
   const toggleStatement = (id: string) => {
     setSelectedStatementIds((prev) => {
       const next = new Set(prev);
@@ -483,6 +554,18 @@ export default function ParticipantFeedback({
       return;
     }
 
+    // 5. Validate attachment if mandatory
+    if (
+      feedbackConfig.allowAttachment &&
+      feedbackConfig.requireAttachment &&
+      !preparedAttachment
+    ) {
+      setFormError(
+        'Please add a supporting document (PDF), JPEG photo, or video (MP4 / MOV) before submitting.'
+      );
+      return;
+    }
+
     // Build payload
     const ratingEntries: FeedbackRatingEntry[] = activeCriteria
       .filter((c) => ratingsMap[c.id] >= 1 && ratingsMap[c.id] <= 5)
@@ -504,10 +587,11 @@ export default function ParticipantFeedback({
       ratingEntries.length === 0 &&
       selectedStatementIds.size === 0 &&
       !cleanComment &&
-      customAnswerEntries.length === 0
+      customAnswerEntries.length === 0 &&
+      !preparedAttachment
     ) {
       setFormError(
-        'Please provide at least one star rating, checklist selection, or written answer before submitting.'
+        'Please provide at least one star rating, checklist selection, written answer, or supporting file before submitting.'
       );
       return;
     }
@@ -569,6 +653,9 @@ export default function ParticipantFeedback({
     if (customAnswerEntries.length > 0) {
       payload.customAnswers = customAnswerEntries;
     }
+    if (preparedAttachment) {
+      payload.attachment = preparedAttachment.meta;
+    }
 
     const cleanName = participantName.trim().slice(0, 100);
     const cleanDept = participantDepartment.trim().slice(0, 100);
@@ -588,8 +675,18 @@ export default function ParticipantFeedback({
     }
 
     setSubmitting(true);
+    setUploadProgress(preparedAttachment ? 0 : null);
     try {
       await setDoc(doc(db, 'feedbackSubmissions', submissionId), payload);
+
+      if (preparedAttachment) {
+        await uploadFeedbackAttachment({
+          submissionId,
+          eventId: selectedEvent.id,
+          prepared: preparedAttachment,
+          onProgress: (pct) => setUploadProgress(pct),
+        });
+      }
 
       const receipt: StoredFeedbackReceipt = {
         submissionId,
@@ -598,6 +695,9 @@ export default function ParticipantFeedback({
         averageRating: avg,
         submittedAtIso: new Date().toISOString(),
         selectedCount: statementSelections.length,
+        ...(preparedAttachment
+          ? { attachmentName: preparedAttachment.meta.fileName }
+          : {}),
       };
       try {
         window.localStorage.setItem(
@@ -607,6 +707,7 @@ export default function ParticipantFeedback({
       } catch {
         // Ignore storage quota errors cleanly
       }
+      clearAttachment();
       setSubmittedReceipt(receipt);
     } catch (error) {
       const { code, message } = extractFirebaseErrorDetails(error);
@@ -620,13 +721,14 @@ export default function ParticipantFeedback({
         message.toLowerCase().includes('permission')
       ) {
         setFormError(
-          'Unable to submit feedback. This session may have been closed by the organizer.'
+          'Unable to submit feedback. This session may have been closed or the scheduled window ended.'
         );
       } else {
         setFormError(`Unable to save feedback (${code || 'network-error'}): ${message}`);
       }
     } finally {
       setSubmitting(false);
+      setUploadProgress(null);
     }
   };
 
@@ -679,6 +781,12 @@ export default function ParticipantFeedback({
                 </div>
               </div>
             </div>
+            {submittedReceipt.attachmentName && (
+              <div className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-blue-200 bg-blue-50 text-xs font-semibold text-blue-800">
+                <Paperclip className="w-3.5 h-3.5" />
+                <span>Attached: {submittedReceipt.attachmentName}</span>
+              </div>
+            )}
           </div>
 
           <div className="px-6 py-4 bg-slate-50 border-t border-slate-200 flex flex-col sm:flex-row items-center justify-between gap-3">
@@ -1189,6 +1297,181 @@ export default function ParticipantFeedback({
               />
             </section>
 
+            {/* Section 4: Supporting Document, JPEG Photo, or Video (PDF / JPG / MP4 / MOV) */}
+            {feedbackConfig.allowAttachment && (
+              <section className="pt-6 border-t border-slate-200 space-y-3">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1.5">
+                  <label
+                    htmlFor="feedback-attachment-input"
+                    className="text-lg font-bold text-slate-900 inline-flex items-center gap-2"
+                  >
+                    <Paperclip className="w-4 h-4 text-blue-700" />
+                    <span>
+                      {feedbackConfig.attachmentLabel ||
+                        '4. Supporting Document, Photo, or Video'}{' '}
+                      {feedbackConfig.requireAttachment && (
+                        <span className="text-rose-600">*</span>
+                      )}
+                    </span>
+                  </label>
+                  <span className="text-xs text-slate-500">
+                    PDF, JPEG, MP4, or MOV · Max 5 MB
+                  </span>
+                </div>
+
+                <input
+                  id="feedback-attachment-input"
+                  ref={attachmentInputRef}
+                  type="file"
+                  accept="application/pdf,.pdf,image/jpeg,.jpg,.jpeg,video/mp4,.mp4,video/quicktime,.mov"
+                  onChange={handleAttachmentFileChange}
+                  className="hidden"
+                />
+
+                {!preparedAttachment ? (
+                  <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50/70 p-4 sm:p-5 space-y-3">
+                    <button
+                      type="button"
+                      disabled={preparingAttachment || submitting}
+                      onClick={() => attachmentInputRef.current?.click()}
+                      className="w-full min-h-[52px] px-4 py-3 rounded-xl bg-white border border-slate-300 hover:bg-slate-100 text-sm font-semibold text-slate-900 transition-colors flex items-center justify-center gap-2 disabled:opacity-60"
+                    >
+                      {preparingAttachment ? (
+                        <>
+                          <Loader2 className="w-4 h-4 animate-spin text-blue-700" />
+                          <span>Preparing file...</span>
+                        </>
+                      ) : (
+                        <>
+                          <Upload className="w-4 h-4 text-blue-700" />
+                          <span>Add Document (PDF, JPEG Photo, or MP4 / MOV Video)</span>
+                        </>
+                      )}
+                    </button>
+                    <p className="text-xs text-slate-500 text-center">
+                      Attach an evaluation sheet (.pdf), activity photo (.jpg / .jpeg), or reflection clip (.mp4 / .mov).
+                    </p>
+                  </div>
+                ) : (
+                  <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 space-y-3">
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                      <div className="flex items-center gap-3 min-w-0">
+                        <div className="w-11 h-11 rounded-xl bg-white border border-slate-200 flex items-center justify-center shrink-0">
+                          {preparedAttachment.meta.fileCategory === 'pdf' ? (
+                            <FileText className="w-5 h-5 text-rose-600" />
+                          ) : preparedAttachment.meta.fileCategory === 'video' ? (
+                            <Film className="w-5 h-5 text-indigo-600" />
+                          ) : (
+                            <ImageIcon className="w-5 h-5 text-emerald-600" />
+                          )}
+                        </div>
+                        <div className="min-w-0">
+                          <div className="text-sm font-bold text-slate-900 truncate">
+                            {preparedAttachment.meta.fileName}
+                          </div>
+                          <div className="text-xs text-slate-500 font-mono-tabular">
+                            {preparedAttachment.meta.mimeType === 'application/pdf'
+                              ? 'PDF Document'
+                              : preparedAttachment.meta.mimeType === 'image/jpeg'
+                              ? 'JPEG Photo'
+                              : preparedAttachment.meta.mimeType === 'video/quicktime'
+                              ? 'MOV Video'
+                              : 'MP4 Video'}{' '}
+                            · {formatAttachmentBytes(preparedAttachment.meta.byteSize)}
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="flex flex-wrap items-center gap-2 shrink-0">
+                        {preparedAttachment.meta.fileCategory === 'pdf' && (
+                          <button
+                            type="button"
+                            onClick={() => setShowInlinePdfPreview((v) => !v)}
+                            className="min-h-[38px] px-3 py-1.5 rounded-lg border border-slate-300 bg-white hover:bg-slate-100 text-xs font-semibold text-slate-800"
+                          >
+                            {showInlinePdfPreview ? 'Hide Preview' : 'Preview PDF'}
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          disabled={submitting || preparingAttachment}
+                          onClick={() => attachmentInputRef.current?.click()}
+                          className="min-h-[38px] px-3 py-1.5 rounded-lg border border-slate-300 bg-white hover:bg-slate-100 text-xs font-semibold text-slate-800 disabled:opacity-50"
+                        >
+                          Replace File
+                        </button>
+                        <button
+                          type="button"
+                          disabled={submitting}
+                          onClick={clearAttachment}
+                          className="min-h-[38px] px-3 py-1.5 rounded-lg border border-rose-200 bg-rose-50 hover:bg-rose-100 text-xs font-semibold text-rose-700 inline-flex items-center gap-1 disabled:opacity-50"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                          <span>Remove</span>
+                        </button>
+                      </div>
+                    </div>
+
+                    {preparedAttachment.meta.fileCategory === 'image' && (
+                      <div className="rounded-xl overflow-hidden border border-slate-200 bg-white max-w-xs">
+                        <img
+                          src={preparedAttachment.previewUrl}
+                          alt={preparedAttachment.meta.fileName}
+                          className="w-full max-h-56 object-contain bg-slate-100"
+                        />
+                      </div>
+                    )}
+
+                    {preparedAttachment.meta.fileCategory === 'video' && (
+                      <div className="rounded-xl overflow-hidden border border-slate-200 bg-black">
+                        <video
+                          src={preparedAttachment.previewUrl}
+                          controls
+                          playsInline
+                          className="w-full max-h-64 mx-auto"
+                        />
+                      </div>
+                    )}
+
+                    {preparedAttachment.meta.fileCategory === 'pdf' &&
+                      showInlinePdfPreview && (
+                        <div className="rounded-xl overflow-hidden border border-slate-200 bg-white">
+                          <iframe
+                            src={preparedAttachment.previewUrl}
+                            title={preparedAttachment.meta.fileName}
+                            className="w-full h-72"
+                          />
+                        </div>
+                      )}
+                  </div>
+                )}
+
+                {attachmentError && (
+                  <div
+                    role="alert"
+                    className="rounded-xl border border-amber-200 bg-amber-50 px-3.5 py-2.5 text-xs text-amber-900"
+                  >
+                    {attachmentError}
+                  </div>
+                )}
+
+                {uploadProgress !== null && (
+                  <div className="space-y-1.5">
+                    <div className="flex items-center justify-between text-xs font-semibold text-blue-800">
+                      <span>Uploading supporting file...</span>
+                      <span className="font-mono-tabular">{uploadProgress}%</span>
+                    </div>
+                    <div className="h-2 rounded-full bg-blue-100 overflow-hidden">
+                      <div
+                        className="h-full bg-blue-700 transition-all duration-200"
+                        style={{ width: `${uploadProgress}%` }}
+                      />
+                    </div>
+                  </div>
+                )}
+              </section>
+            )}
+
             {/* Optional Participant Identification (auto-filled when checked in) */}
             <section className="pt-5 border-t border-slate-200 space-y-3">
               <div className="flex items-center justify-between gap-2">
@@ -1241,7 +1524,7 @@ export default function ParticipantFeedback({
               </span>
               <button
                 type="submit"
-                disabled={submitting}
+                disabled={submitting || preparingAttachment}
                 className="w-full sm:w-auto min-h-[48px] px-6 py-3 rounded-xl bg-blue-700 hover:bg-blue-800 text-white text-sm font-semibold transition-colors inline-flex items-center justify-center gap-2 disabled:opacity-60"
               >
                 {submitting ? (
@@ -1249,7 +1532,13 @@ export default function ParticipantFeedback({
                 ) : (
                   <Send className="w-4 h-4" />
                 )}
-                <span>{submitting ? 'Submitting...' : 'Submit Feedback'}</span>
+                <span>
+                  {submitting
+                    ? uploadProgress !== null
+                      ? `Uploading (${uploadProgress}%)...`
+                      : 'Submitting...'
+                    : 'Submit Feedback'}
+                </span>
               </button>
             </div>
           </form>

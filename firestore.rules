@@ -259,7 +259,9 @@ service cloud.firestore {
           'ratingSectionTitle', 'ratingSectionSubtitle',
           'checklistSectionTitle', 'checklistSectionSubtitle',
           'commentQuestionLabel', 'commentPlaceholder',
-          'requireWrittenComment', 'ratingCriteria', 'categories', 'statements',
+          'requireWrittenComment',
+          'allowAttachment', 'requireAttachment', 'attachmentLabel',
+          'ratingCriteria', 'categories', 'statements',
           'customQuestions',
           'scheduleEnabled', 'openAtIso', 'closeAtIso',
           'openTimestamp', 'closeTimestamp', 'scheduleClosedMessage',
@@ -275,6 +277,9 @@ service cloud.firestore {
         (!('commentQuestionLabel' in data) || (data.commentQuestionLabel is string && data.commentQuestionLabel.size() <= 160)) &&
         (!('commentPlaceholder' in data) || (data.commentPlaceholder is string && data.commentPlaceholder.size() <= 240)) &&
         data.requireWrittenComment is bool &&
+        (!('allowAttachment' in data) || data.allowAttachment is bool) &&
+        (!('requireAttachment' in data) || data.requireAttachment is bool) &&
+        (!('attachmentLabel' in data) || (data.attachmentLabel is string && data.attachmentLabel.size() <= 160)) &&
         data.ratingCriteria is list && data.ratingCriteria.size() >= 1 && data.ratingCriteria.size() <= 12 &&
         data.ratingCriteria[0] is map &&
         data.categories is list && data.categories.size() >= 1 && data.categories.size() <= 12 &&
@@ -310,6 +315,18 @@ service cloud.firestore {
           );
     }
 
+    function isValidFeedbackAttachmentMeta(att) {
+      return att is map &&
+        att.keys().hasAll(['attachmentId', 'fileName', 'mimeType', 'fileCategory', 'byteSize', 'chunkCount']) &&
+        att.keys().hasOnly(['attachmentId', 'fileName', 'mimeType', 'fileCategory', 'byteSize', 'chunkCount']) &&
+        isValidId(att.attachmentId) &&
+        att.fileName is string && att.fileName.size() >= 1 && att.fileName.size() <= 180 &&
+        att.mimeType in ['application/pdf', 'image/jpeg', 'video/mp4', 'video/quicktime'] &&
+        att.fileCategory in ['pdf', 'image', 'video'] &&
+        att.byteSize is int && att.byteSize >= 1 && att.byteSize <= 5242880 &&
+        att.chunkCount is int && att.chunkCount >= 1 && att.chunkCount <= 24;
+    }
+
     function isValidFeedbackSubmission(data) {
       return data.keys().hasAll([
           'eventId', 'eventTitle', 'eventDate', 'eventVenue',
@@ -320,7 +337,7 @@ service cloud.firestore {
         data.keys().hasOnly([
           'eventId', 'eventTitle', 'eventDate', 'eventVenue',
           'facilitatorName', 'sessionTopic', 'ratings', 'averageRating',
-          'selectedStatements', 'writtenComment', 'customAnswers',
+          'selectedStatements', 'writtenComment', 'customAnswers', 'attachment',
           'participantName', 'participantDepartment', 'participantEmail', 'attendanceId',
           'clientSubmissionToken', 'serverTimestamp'
         ]) &&
@@ -337,12 +354,46 @@ service cloud.firestore {
         (data.selectedStatements.size() == 0 || data.selectedStatements[0] is map) &&
         data.writtenComment is string && data.writtenComment.size() <= 1500 &&
         (!('customAnswers' in data) || (data.customAnswers is list && data.customAnswers.size() <= 6 && (data.customAnswers.size() == 0 || data.customAnswers[0] is map))) &&
+        (!('attachment' in data) || isValidFeedbackAttachmentMeta(data.attachment)) &&
         (!('participantName' in data) || (data.participantName is string && data.participantName.size() <= 100)) &&
         (!('participantDepartment' in data) || (data.participantDepartment is string && data.participantDepartment.size() <= 100)) &&
         (!('participantEmail' in data) || data.participantEmail == '' || isValidEmail(data.participantEmail)) &&
         (!('attendanceId' in data) || data.attendanceId == '' || isValidId(data.attendanceId)) &&
         isValidId(data.clientSubmissionToken) &&
         data.serverTimestamp is timestamp;
+    }
+
+    function isValidFeedbackAttachment(data) {
+      return data.keys().hasAll([
+          'submissionId', 'eventId', 'fileName', 'mimeType',
+          'fileCategory', 'byteSize', 'chunkCount', 'createdAt'
+        ]) &&
+        data.keys().hasOnly([
+          'submissionId', 'eventId', 'fileName', 'mimeType',
+          'fileCategory', 'byteSize', 'chunkCount', 'createdAt'
+        ]) &&
+        isValidId(data.submissionId) &&
+        isValidId(data.eventId) &&
+        data.fileName is string && data.fileName.size() >= 1 && data.fileName.size() <= 180 &&
+        data.mimeType in ['application/pdf', 'image/jpeg', 'video/mp4', 'video/quicktime'] &&
+        data.fileCategory in ['pdf', 'image', 'video'] &&
+        data.byteSize is int && data.byteSize >= 1 && data.byteSize <= 5242880 &&
+        data.chunkCount is int && data.chunkCount >= 1 && data.chunkCount <= 24 &&
+        data.createdAt is timestamp;
+    }
+
+    function isValidFeedbackAttachmentChunk(data) {
+      return data.keys().hasAll([
+          'submissionId', 'eventId', 'chunkIndex', 'data', 'createdAt'
+        ]) &&
+        data.keys().hasOnly([
+          'submissionId', 'eventId', 'chunkIndex', 'data', 'createdAt'
+        ]) &&
+        isValidId(data.submissionId) &&
+        isValidId(data.eventId) &&
+        data.chunkIndex is int && data.chunkIndex >= 0 && data.chunkIndex < 24 &&
+        data.data is string && data.data.size() >= 1 && data.data.size() <= 350000 &&
+        data.createdAt is timestamp;
     }
 
     function isValidRecognitionCategory(data) {
@@ -680,7 +731,9 @@ service cloud.firestore {
           'ratingSectionTitle', 'ratingSectionSubtitle',
           'checklistSectionTitle', 'checklistSectionSubtitle',
           'commentQuestionLabel', 'commentPlaceholder',
-          'requireWrittenComment', 'ratingCriteria', 'categories', 'statements',
+          'requireWrittenComment',
+          'allowAttachment', 'requireAttachment', 'attachmentLabel',
+          'ratingCriteria', 'categories', 'statements',
           'customQuestions',
           'scheduleEnabled', 'openAtIso', 'closeAtIso',
           'openTimestamp', 'closeTimestamp', 'scheduleClosedMessage',
@@ -701,6 +754,39 @@ service cloud.firestore {
         isFeedbackWindowOpen(incoming().eventId);
       allow update: if false;
       allow delete: if isAdmin() && isValidId(submissionId);
+    }
+
+    match /feedbackAttachments/{attachmentId} {
+      allow get: if isAdmin() && isValidId(attachmentId);
+      allow list: if isAdmin();
+      allow create: if isValidId(attachmentId) &&
+        isValidFeedbackAttachment(incoming()) &&
+        incoming().createdAt == request.time &&
+        exists(/databases/$(database)/documents/events/$(incoming().eventId)) &&
+        get(/databases/$(database)/documents/events/$(incoming().eventId)).data.status == 'active' &&
+        isFeedbackWindowOpen(incoming().eventId) &&
+        exists(/databases/$(database)/documents/feedbackSubmissions/$(incoming().submissionId)) &&
+        get(/databases/$(database)/documents/feedbackSubmissions/$(incoming().submissionId)).data.eventId == incoming().eventId &&
+        'attachment' in get(/databases/$(database)/documents/feedbackSubmissions/$(incoming().submissionId)).data &&
+        get(/databases/$(database)/documents/feedbackSubmissions/$(incoming().submissionId)).data.attachment.attachmentId == attachmentId &&
+        get(/databases/$(database)/documents/feedbackSubmissions/$(incoming().submissionId)).data.attachment.chunkCount == incoming().chunkCount;
+      allow update: if false;
+      allow delete: if isAdmin() && isValidId(attachmentId);
+
+      match /chunks/{chunkId} {
+        allow get: if isAdmin() && isValidId(attachmentId) && isValidId(chunkId);
+        allow list: if isAdmin();
+        allow create: if isValidId(attachmentId) &&
+          chunkId is string && chunkId.matches('^chunk_[0-9]{1,2}$') &&
+          isValidFeedbackAttachmentChunk(incoming()) &&
+          incoming().createdAt == request.time &&
+          exists(/databases/$(database)/documents/feedbackAttachments/$(attachmentId)) &&
+          get(/databases/$(database)/documents/feedbackAttachments/$(attachmentId)).data.eventId == incoming().eventId &&
+          get(/databases/$(database)/documents/feedbackAttachments/$(attachmentId)).data.submissionId == incoming().submissionId &&
+          incoming().chunkIndex < get(/databases/$(database)/documents/feedbackAttachments/$(attachmentId)).data.chunkCount;
+        allow update: if false;
+        allow delete: if isAdmin() && isValidId(attachmentId) && isValidId(chunkId);
+      }
     }
 
     match /recognitionCategories/{categoryId} {

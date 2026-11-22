@@ -9,7 +9,6 @@ import {
   MessageSquare,
   RefreshCw,
   ShieldCheck,
-  Upload,
   UserCheck,
   Volume2,
 } from 'lucide-react';
@@ -151,7 +150,6 @@ export default function ParticipantCheckIn({
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const nativeCameraInputRef = useRef<HTMLInputElement | null>(null);
-  const fileUploadInputRef = useRef<HTMLInputElement | null>(null);
   const submitLockRef = useRef(false);
 
   // Load saved Voice Announcement Settings
@@ -404,7 +402,7 @@ export default function ParticipantCheckIn({
 
     if (typeof window !== 'undefined' && window.isSecureContext === false) {
       setCameraError(
-        'Live browser camera requires a secure HTTPS connection. Please open the HTTPS attendance link, or use "Use Phone Camera" / "Upload Photo" below.'
+        'Live browser camera requires a secure HTTPS connection. Please open the HTTPS attendance link, or tap "Use native phone camera app" below.'
       );
       setCameraOpen(false);
       return;
@@ -412,7 +410,7 @@ export default function ParticipantCheckIn({
 
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
       setCameraError(
-        'Live camera preview is not supported in this browser. Please tap "Use Phone Camera" or "Upload Photo" below.'
+        'Live camera preview is not supported in this browser. Please tap "Use native phone camera app" below.'
       );
       setCameraOpen(false);
       return;
@@ -455,21 +453,21 @@ export default function ParticipantCheckIn({
       const errName = err instanceof DOMException ? err.name : '';
       if (errName === 'NotAllowedError' || errName === 'PermissionDeniedError') {
         setCameraError(
-          'Camera permission was denied. Allow camera access in your browser site settings (Safari: Aa / Settings → Camera → Allow; Chrome: Lock icon → Permissions → Camera), or tap "Upload Photo" below.'
+          'Camera permission was denied. Allow camera access in your browser site settings (Safari: Aa / Settings → Camera → Allow; Chrome: Lock icon → Permissions → Camera), or tap "Use native phone camera app" below.'
         );
       } else if (errName === 'NotFoundError' || errName === 'DevicesNotFoundError') {
         setCameraError(
-          'No camera was detected on this device. Please use "Upload Photo" below to select a photo.'
+          'No live browser camera was detected on this device. Please ensure a camera is connected or tap "Use native phone camera app" below.'
         );
       } else if (errName === 'NotReadableError' || errName === 'TrackStartError') {
         setCameraError(
-          'Your camera is currently being used by another application. Close the other app and try again, or use "Upload Photo" below.'
+          'Your camera is currently being used by another application. Close the other app and try again, or tap "Use native phone camera app" below.'
         );
       } else {
         const message =
           err instanceof Error ? err.message : 'Camera access is unavailable.';
         setCameraError(
-          `Unable to open live camera (${message}). Please tap "Use Phone Camera" or "Upload Photo" below.`
+          `Unable to open live camera (${message}). Please tap "Use native phone camera app" below.`
         );
       }
     }
@@ -574,7 +572,7 @@ export default function ParticipantCheckIn({
       return;
     }
     if (!photoDataUrl) {
-      setFormError('Please take or upload a verification photo.');
+      setFormError('Please take a verification photo before submitting.');
       return;
     }
     if (!photoConsent) {
@@ -1129,7 +1127,7 @@ export default function ParticipantCheckIn({
               Participant Check-In Form
             </h2>
             <p className="text-sm text-slate-600 mt-1">
-              Complete the fields below, take or upload your verification photo, and confirm photo consent to submit.
+              Complete the fields below, take your verification photo, and confirm photo consent to submit.
             </p>
           </div>
 
@@ -1200,7 +1198,7 @@ export default function ParticipantCheckIn({
               )}
             </div>
 
-            {/* 3. Photo (Live Camera, Native Phone Camera, or Photo Upload) */}
+            {/* 3. Photo (Live Camera or Native Phone Camera) */}
             <div>
               <div className="flex items-center justify-between mb-2">
                 <span className="block text-sm font-semibold text-slate-900">
@@ -1229,16 +1227,6 @@ export default function ParticipantCheckIn({
                 onChange={handleFileChange}
                 className="hidden"
                 aria-label="Take a photo with device camera app"
-              />
-
-              {/* Hidden Standard Photo Picker / Upload Input (works on iOS Photo Library, iPad, Android Gallery, Windows, macOS) */}
-              <input
-                ref={fileUploadInputRef}
-                type="file"
-                accept="image/*"
-                onChange={handleFileChange}
-                className="hidden"
-                aria-label="Upload a photo from your device"
               />
 
               {photoDataUrl ? (
@@ -1270,14 +1258,6 @@ export default function ParticipantCheckIn({
                       >
                         <Camera className="w-4 h-4" />
                         <span>Retake Picture</span>
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => fileUploadInputRef.current?.click()}
-                        className="min-h-[44px] px-4 py-2 rounded-xl border border-slate-300 bg-white text-xs font-semibold text-slate-800 hover:bg-slate-100 transition-colors flex items-center gap-1.5"
-                      >
-                        <Upload className="w-4 h-4" />
-                        <span>Choose Different Photo</span>
                       </button>
                     </div>
                   </div>
@@ -1333,27 +1313,15 @@ export default function ParticipantCheckIn({
                 </div>
               ) : (
                 <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50/70 p-4 sm:p-5 space-y-3">
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-                    <button
-                      type="button"
-                      onClick={() => void startCamera(cameraFacing)}
-                      disabled={processingPhoto}
-                      className="w-full min-h-[52px] px-4 py-3 rounded-xl bg-white border border-slate-300 text-sm font-semibold text-slate-900 hover:bg-slate-100 transition-colors flex items-center justify-center gap-2"
-                    >
-                      <Camera className="w-5 h-5 text-blue-700 shrink-0" />
-                      <span>Take Picture (Live Camera)</span>
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={() => fileUploadInputRef.current?.click()}
-                      disabled={processingPhoto}
-                      className="w-full min-h-[52px] px-4 py-3 rounded-xl bg-white border border-slate-300 text-sm font-semibold text-slate-800 hover:bg-slate-100 transition-colors flex items-center justify-center gap-2"
-                    >
-                      <Upload className="w-4 h-4 text-slate-700 shrink-0" />
-                      <span>Upload Photo</span>
-                    </button>
-                  </div>
+                  <button
+                    type="button"
+                    onClick={() => void startCamera(cameraFacing)}
+                    disabled={processingPhoto}
+                    className="w-full min-h-[52px] px-4 py-3 rounded-xl bg-white border border-slate-300 text-sm font-semibold text-slate-900 hover:bg-slate-100 transition-colors flex items-center justify-center gap-2"
+                  >
+                    <Camera className="w-5 h-5 text-blue-700 shrink-0" />
+                    <span>Take Picture (Live Camera)</span>
+                  </button>
 
                   <div className="flex flex-col sm:flex-row items-center justify-between gap-2 text-xs text-slate-500">
                     <span>

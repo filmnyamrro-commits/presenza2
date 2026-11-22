@@ -147,6 +147,9 @@ export function buildDefaultFeedbackConfig(eventId = 'default'): FeedbackConfig 
     commentPlaceholder:
       'Please share your comments, suggestions, or recommendations.',
     requireWrittenComment: false,
+    allowAttachment: true,
+    requireAttachment: false,
+    attachmentLabel: '4. Supporting Document, Photo, or Video',
     ratingCriteria: DEFAULT_RATING_CRITERIA.map((c) => ({ ...c })),
     categories: DEFAULT_FEEDBACK_CATEGORIES.map((c) => ({ ...c })),
     statements: DEFAULT_FEEDBACK_STATEMENTS.map((s) => ({ ...s })),
@@ -205,6 +208,19 @@ export function mergeFeedbackConfig(
       typeof partial.requireWrittenComment === 'boolean'
         ? partial.requireWrittenComment
         : base.requireWrittenComment,
+    allowAttachment:
+      typeof partial.allowAttachment === 'boolean'
+        ? partial.allowAttachment
+        : base.allowAttachment,
+    requireAttachment:
+      typeof partial.requireAttachment === 'boolean'
+        ? partial.requireAttachment
+        : base.requireAttachment,
+    attachmentLabel:
+      typeof partial.attachmentLabel === 'string' &&
+      partial.attachmentLabel.trim()
+        ? partial.attachmentLabel.slice(0, 160)
+        : base.attachmentLabel,
     ratingCriteria:
       Array.isArray(partial.ratingCriteria) && partial.ratingCriteria.length > 0
         ? partial.ratingCriteria.slice(0, 12).map((c) => ({

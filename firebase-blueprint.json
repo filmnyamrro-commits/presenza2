@@ -438,6 +438,9 @@
         "commentQuestionLabel": { "type": "string", "maxLength": 160 },
         "commentPlaceholder": { "type": "string", "maxLength": 240 },
         "requireWrittenComment": { "type": "boolean" },
+        "allowAttachment": { "type": "boolean" },
+        "requireAttachment": { "type": "boolean" },
+        "attachmentLabel": { "type": "string", "maxLength": 160 },
         "ratingCriteria": { "type": "array", "maxItems": 12 },
         "categories": { "type": "array", "maxItems": 12 },
         "statements": { "type": "array", "maxItems": 40 },
@@ -493,6 +496,7 @@
         "selectedStatements": { "type": "array", "maxItems": 40 },
         "writtenComment": { "type": "string", "maxLength": 1500 },
         "customAnswers": { "type": "array", "maxItems": 6 },
+        "attachment": { "type": "object", "description": "Optional metadata for a supporting PDF, JPEG photo, or MP4/MOV video stored in feedbackAttachments." },
         "participantName": { "type": "string", "maxLength": 100 },
         "participantDepartment": { "type": "string", "maxLength": 100 },
         "participantEmail": { "type": "string", "maxLength": 128 },
@@ -519,6 +523,70 @@
         "clientSubmissionToken",
         "serverTimestamp"
       ]
+    },
+    "FeedbackAttachment": {
+      "title": "FeedbackAttachment",
+      "description": "Metadata for an uploaded PDF, JPEG photo, or MP4/MOV video linked to a feedback submission.",
+      "type": "object",
+      "properties": {
+        "submissionId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "eventId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "fileName": { "type": "string", "minLength": 1, "maxLength": 180 },
+        "mimeType": {
+          "type": "string",
+          "enum": ["application/pdf", "image/jpeg", "video/mp4", "video/quicktime"]
+        },
+        "fileCategory": {
+          "type": "string",
+          "enum": ["pdf", "image", "video"]
+        },
+        "byteSize": { "type": "number", "minimum": 1, "maximum": 5242880 },
+        "chunkCount": { "type": "number", "minimum": 1, "maximum": 24 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "submissionId",
+        "eventId",
+        "fileName",
+        "mimeType",
+        "fileCategory",
+        "byteSize",
+        "chunkCount",
+        "createdAt"
+      ]
+    },
+    "FeedbackAttachmentChunk": {
+      "title": "FeedbackAttachmentChunk",
+      "description": "Bounded base64 slice of a participant feedback attachment stored under feedbackAttachments/{attachmentId}/chunks.",
+      "type": "object",
+      "properties": {
+        "submissionId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "eventId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "chunkIndex": { "type": "number", "minimum": 0, "maximum": 23 },
+        "data": { "type": "string", "minLength": 1, "maxLength": 350000 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["submissionId", "eventId", "chunkIndex", "data", "createdAt"]
     },
     "RecognitionCategory": {
       "title": "RecognitionCategory",
@@ -856,6 +924,14 @@
     "/feedbackSubmissions/{submissionId}": {
       "schema": { "$ref": "#/entities/FeedbackSubmission" },
       "description": "Participant feedback and evaluation responses linked to an event."
+    },
+    "/feedbackAttachments/{attachmentId}": {
+      "schema": { "$ref": "#/entities/FeedbackAttachment" },
+      "description": "Supporting PDF, JPEG photo, and MP4/MOV video attachment metadata linked to feedback submissions."
+    },
+    "/feedbackAttachments/{attachmentId}/chunks/{chunkId}": {
+      "schema": { "$ref": "#/entities/FeedbackAttachmentChunk" },
+      "description": "Bounded base64 file chunks for feedback supporting attachments."
     },
     "/recognitionCategories/{categoryId}": {
       "schema": { "$ref": "#/entities/RecognitionCategory" },

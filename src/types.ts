@@ -168,6 +168,23 @@ export interface FeedbackCustomAnswer {
   answer: string;
 }
 
+export type FeedbackAttachmentMimeType =
+  | 'application/pdf'
+  | 'image/jpeg'
+  | 'video/mp4'
+  | 'video/quicktime';
+
+export type FeedbackAttachmentCategory = 'pdf' | 'image' | 'video';
+
+export interface FeedbackAttachmentMeta {
+  attachmentId: string;
+  fileName: string;
+  mimeType: FeedbackAttachmentMimeType;
+  fileCategory: FeedbackAttachmentCategory;
+  byteSize: number;
+  chunkCount: number;
+}
+
 export interface FeedbackConfig {
   eventId: string; // 'default' or specific event ID
   formHeading: string;
@@ -179,6 +196,9 @@ export interface FeedbackConfig {
   commentQuestionLabel: string;
   commentPlaceholder: string;
   requireWrittenComment: boolean;
+  allowAttachment: boolean;
+  requireAttachment: boolean;
+  attachmentLabel: string;
   ratingCriteria: FeedbackRatingCriterion[];
   categories: FeedbackStatementCategory[];
   statements: FeedbackStatement[];
@@ -216,6 +236,7 @@ export interface FeedbackSubmissionRecord {
   selectedStatements: FeedbackStatementSelection[];
   writtenComment: string;
   customAnswers?: FeedbackCustomAnswer[];
+  attachment?: FeedbackAttachmentMeta;
   participantName?: string;
   participantDepartment?: string;
   participantEmail?: string;

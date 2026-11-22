@@ -8,9 +8,14 @@ import {
   Copy,
   Download,
   ExternalLink,
+  Eye,
+  FileText,
+  Film,
   Filter,
+  Image as ImageIcon,
   Loader2,
   MessageSquare,
+  Paperclip,
   Plus,
   QrCode,
   RotateCcw,
@@ -20,6 +25,7 @@ import {
   ThumbsUp,
   Trash2,
   TrendingUp,
+  X,
 } from 'lucide-react';
 import { type User } from 'firebase/auth';
 import {
@@ -52,6 +58,11 @@ import {
   parseIsoTimestampMs,
 } from '../utils/feedbackAndRecognitionDefaults';
 import { buildFeedbackQrUrl } from '../utils/qrUrl';
+import {
+  deleteFeedbackAttachmentRecord,
+  fetchFeedbackAttachmentBlobUrl,
+  formatAttachmentBytes,
+} from '../utils/feedbackAttachment';
 
 interface AdminFeedbackModuleProps {
   user: User;
@@ -89,6 +100,16 @@ export default function AdminFeedbackModule({
   const [deletingSubmissionId, setDeletingSubmissionId] = useState<string | null>(
     null
   );
+
+  // Attachment Preview Modal state
+  const [previewingSub, setPreviewingSub] =
+    useState<FeedbackSubmissionRecord | null>(null);
+  const [previewBlobUrl, setPreviewBlobUrl] = useState<string | null>(null);
+  const [previewRevokeFn, setPreviewRevokeFn] = useState<(() => void) | null>(
+    null
+  );
+  const [loadingPreview, setLoadingPreview] = useState(false);
+  const [previewError, setPreviewError] = useState<string | null>(null);
 
   // Form Customizer State
   const [configTargetId, setConfigTargetId] = useState<string>('default');
@@ -415,15 +436,65 @@ export default function AdminFeedbackModule({
     document.body.removeChild(link);
   };
 
-  const handleDeleteSubmission = async (id: string) => {
-    setDeletingSubmissionId(id);
+  // Clean up any active attachment Blob URL on unmount
+  useEffect(() => {
+    return () => {
+      if (previewRevokeFn) {
+        previewRevokeFn();
+      }
+    };
+  }, [previewRevokeFn]);
+
+  const handleCloseAttachmentModal = () => {
+    if (previewRevokeFn) {
+      previewRevokeFn();
+    }
+    setPreviewingSub(null);
+    setPreviewBlobUrl(null);
+    setPreviewRevokeFn(null);
+    setLoadingPreview(false);
+    setPreviewError(null);
+  };
+
+  const handleOpenAttachmentModal = async (sub: FeedbackSubmissionRecord) => {
+    if (!sub.attachment) return;
+    if (previewRevokeFn) {
+      previewRevokeFn();
+    }
+    setPreviewingSub(sub);
+    setPreviewBlobUrl(null);
+    setPreviewRevokeFn(null);
+    setPreviewError(null);
+    setLoadingPreview(true);
     try {
-      await deleteDoc(doc(db, 'feedbackSubmissions', id));
+      const { blobUrl, revoke } = await fetchFeedbackAttachmentBlobUrl(
+        sub.attachment
+      );
+      setPreviewBlobUrl(blobUrl);
+      setPreviewRevokeFn(() => revoke);
+    } catch (error) {
+      setPreviewError(
+        error instanceof Error
+          ? error.message
+          : 'Failed to load supporting attachment.'
+      );
+    } finally {
+      setLoadingPreview(false);
+    }
+  };
+
+  const handleDeleteSubmission = async (sub: FeedbackSubmissionRecord) => {
+    setDeletingSubmissionId(sub.id);
+    try {
+      if (sub.attachment?.attachmentId) {
+        await deleteFeedbackAttachmentRecord(sub.attachment.attachmentId);
+      }
+      await deleteDoc(doc(db, 'feedbackSubmissions', sub.id));
     } catch (error) {
       handleFirestoreError(
         error,
         OperationType.DELETE,
-        `feedbackSubmissions/${id}`
+        `feedbackSubmissions/${sub.id}`
       );
     } finally {
       setDeletingSubmissionId(null);
@@ -731,6 +802,13 @@ export default function AdminFeedbackModule({
           '3. Written Comments',
         commentPlaceholder: draftConfig.commentPlaceholder.trim().slice(0, 240),
         requireWrittenComment: draftConfig.requireWrittenComment,
+        allowAttachment: draftConfig.allowAttachment,
+        requireAttachment: draftConfig.allowAttachment
+          ? draftConfig.requireAttachment
+          : false,
+        attachmentLabel:
+          draftConfig.attachmentLabel.trim().slice(0, 160) ||
+          '4. Supporting Document, Photo, or Video',
         ratingCriteria: cleanedCriteria.slice(0, 12),
         categories: draftConfig.categories.slice(0, 12),
         statements: cleanedStatements.slice(0, 40),
@@ -1470,6 +1548,40 @@ export default function AdminFeedbackModule({
                               ))}
                             </div>
                           )}
+
+                        {sub.attachment && (
+                          <div className="pt-2">
+                            <button
+                              type="button"
+                              onClick={() => void handleOpenAttachmentModal(sub)}
+                              className="inline-flex items-center gap-2 rounded-xl border border-blue-200 bg-blue-50/70 hover:bg-blue-100/80 px-3 py-1.5 text-xs font-semibold text-blue-900 transition-colors"
+                            >
+                              {sub.attachment.fileCategory === 'pdf' ? (
+                                <FileText className="w-3.5 h-3.5 text-rose-700 shrink-0" />
+                              ) : sub.attachment.fileCategory === 'video' ? (
+                                <Film className="w-3.5 h-3.5 text-indigo-700 shrink-0" />
+                              ) : (
+                                <ImageIcon className="w-3.5 h-3.5 text-emerald-700 shrink-0" />
+                              )}
+                              <span className="truncate max-w-[220px]">
+                                {sub.attachment.fileName}
+                              </span>
+                              <span className="text-[11px] font-mono-tabular text-blue-700/80 shrink-0">
+                                ({formatAttachmentBytes(sub.attachment.byteSize)})
+                              </span>
+                              <span className="inline-flex items-center gap-1 pl-1 border-l border-blue-200 text-blue-700 shrink-0">
+                                <Eye className="w-3.5 h-3.5" />
+                                <span>
+                                  {sub.attachment.fileCategory === 'pdf'
+                                    ? 'View PDF'
+                                    : sub.attachment.fileCategory === 'video'
+                                    ? 'Play Video'
+                                    : 'View Photo'}
+                                </span>
+                              </span>
+                            </button>
+                          </div>
+                        )}
                       </div>
 
                       <div className="flex items-center gap-3 shrink-0">
@@ -1489,7 +1601,7 @@ export default function AdminFeedbackModule({
                         <button
                           type="button"
                           disabled={deletingSubmissionId === sub.id}
-                          onClick={() => void handleDeleteSubmission(sub.id)}
+                          onClick={() => void handleDeleteSubmission(sub)}
                           className="min-h-[34px] min-w-[34px] rounded-lg text-slate-400 hover:text-rose-700 hover:bg-rose-50 inline-flex items-center justify-center transition-colors disabled:opacity-50"
                           aria-label="Delete feedback submission"
                         >
@@ -1990,6 +2102,87 @@ export default function AdminFeedbackModule({
                   </span>
                 </label>
               </div>
+            </div>
+
+            {/* Supporting Document / Photo / Video Upload Settings */}
+            <div className="rounded-xl border border-slate-200 bg-slate-50/70 p-4 space-y-3">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <Paperclip className="w-4 h-4 text-blue-700" />
+                  <div>
+                    <h4 className="text-xs font-bold text-slate-900">
+                      Supporting Document, Photo &amp; Video Attachment
+                    </h4>
+                    <p className="text-[11px] text-slate-500">
+                      Allow participants to attach PDF (.pdf), JPEG photo (.jpg / .jpeg), or video (.mp4 / .mov) with their evaluation.
+                    </p>
+                  </div>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <label className="min-h-[36px] px-3 py-1.5 rounded-lg border border-slate-200 bg-white inline-flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={draftConfig.allowAttachment}
+                      onChange={(e) =>
+                        setDraftConfig((prev) => ({
+                          ...prev,
+                          allowAttachment: e.target.checked,
+                          requireAttachment: e.target.checked
+                            ? prev.requireAttachment
+                            : false,
+                        }))
+                      }
+                      className="rounded border-slate-300 text-blue-700 focus:ring-blue-600"
+                    />
+                    <span className="text-xs font-semibold text-slate-800">
+                      Enable File Upload
+                    </span>
+                  </label>
+                  {draftConfig.allowAttachment && (
+                    <label className="min-h-[36px] px-3 py-1.5 rounded-lg border border-slate-200 bg-white inline-flex items-center gap-2 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={draftConfig.requireAttachment}
+                        onChange={(e) =>
+                          setDraftConfig((prev) => ({
+                            ...prev,
+                            requireAttachment: e.target.checked,
+                          }))
+                        }
+                        className="rounded border-slate-300 text-blue-700 focus:ring-blue-600"
+                      />
+                      <span className="text-xs font-semibold text-slate-800">
+                        Mandatory Attachment
+                      </span>
+                    </label>
+                  )}
+                </div>
+              </div>
+
+              {draftConfig.allowAttachment && (
+                <div>
+                  <label
+                    htmlFor="fb-attachment-label"
+                    className="block text-xs font-semibold text-slate-700 mb-1"
+                  >
+                    Attachment Section Heading
+                  </label>
+                  <input
+                    id="fb-attachment-label"
+                    type="text"
+                    maxLength={160}
+                    value={draftConfig.attachmentLabel}
+                    onChange={(e) =>
+                      setDraftConfig((prev) => ({
+                        ...prev,
+                        attachmentLabel: e.target.value,
+                      }))
+                    }
+                    placeholder="4. Supporting Document, Photo, or Video"
+                    className="w-full min-h-[38px] px-3 py-1.5 text-xs sm:text-sm bg-white border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-600"
+                  />
+                </div>
+              )}
             </div>
           </section>
 
@@ -2522,6 +2715,95 @@ export default function AdminFeedbackModule({
                 ))}
               </div>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* Supporting Document / Photo / Video Preview Modal */}
+      {previewingSub?.attachment && (
+        <div
+          className="fixed inset-0 z-50 bg-slate-950/75 backdrop-blur-xs flex items-center justify-center p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="attachment-preview-title"
+        >
+          <div className="w-full max-w-3xl bg-white border border-slate-200 rounded-2xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
+            <div className="px-5 py-4 border-b border-slate-200 flex items-center justify-between gap-3">
+              <div className="min-w-0">
+                <h3
+                  id="attachment-preview-title"
+                  className="text-sm font-bold text-slate-900 truncate"
+                >
+                  {previewingSub.attachment.fileName}
+                </h3>
+                <p className="text-xs text-slate-500 mt-0.5 truncate">
+                  {previewingSub.participantName?.trim() || 'Anonymous Participant'} ·{' '}
+                  {previewingSub.eventTitle} ·{' '}
+                  {formatAttachmentBytes(previewingSub.attachment.byteSize)}
+                </p>
+              </div>
+              <div className="flex items-center gap-2 shrink-0">
+                {previewBlobUrl && (
+                  <a
+                    href={previewBlobUrl}
+                    download={previewingSub.attachment.fileName}
+                    className="min-h-[36px] px-3 py-1.5 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 text-xs font-semibold text-slate-800 inline-flex items-center gap-1.5"
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                    <span>Download</span>
+                  </a>
+                )}
+                <button
+                  type="button"
+                  onClick={handleCloseAttachmentModal}
+                  aria-label="Close attachment preview"
+                  className="min-h-[36px] min-w-[36px] rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-100 inline-flex items-center justify-center"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
+
+            <div className="p-5 overflow-y-auto flex-1 bg-slate-50 flex items-center justify-center min-h-[260px]">
+              {loadingPreview ? (
+                <div className="flex flex-col items-center gap-2.5 text-slate-600">
+                  <Loader2 className="w-7 h-7 animate-spin text-blue-700" />
+                  <span className="text-xs font-medium">
+                    Loading supporting attachment...
+                  </span>
+                </div>
+              ) : previewError ? (
+                <div className="max-w-md rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-xs text-rose-800 text-center">
+                  {previewError}
+                </div>
+              ) : previewBlobUrl ? (
+                previewingSub.attachment.fileCategory === 'image' ? (
+                  <img
+                    src={previewBlobUrl}
+                    alt={previewingSub.attachment.fileName}
+                    className="max-h-[68vh] w-auto rounded-xl border border-slate-200 shadow-sm object-contain bg-white"
+                  />
+                ) : previewingSub.attachment.fileCategory === 'video' ? (
+                  <video
+                    src={previewBlobUrl}
+                    controls
+                    playsInline
+                    className="max-h-[68vh] w-full rounded-xl border border-slate-200 bg-black"
+                  />
+                ) : (
+                  <div className="w-full space-y-3">
+                    <iframe
+                      src={previewBlobUrl}
+                      title={previewingSub.attachment.fileName}
+                      className="w-full h-[65vh] rounded-xl border border-slate-200 bg-white"
+                    />
+                    <p className="text-[11px] text-slate-500 text-center">
+                      If your browser blocks inline PDF rendering, use the Download button above to open it directly.
+                    </p>
+                  </div>
+                )
+              ) : null}
+            </div>
           </div>
         </div>
       )}

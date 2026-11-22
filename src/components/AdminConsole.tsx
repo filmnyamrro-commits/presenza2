@@ -134,6 +134,10 @@ export type AdminSectionTab =
   | 'certificates'
   | 'voice';
 
+const PRESENZA_NATIVE_LOGO_URL =
+  '/assets/aistudio/Logo_Presenza__Kehadiran_Cerdas_Beraksen_Emas_259b7478.png';
+const ADMIN_NATIVE_LOGO_STORAGE_KEY = 'presenza_admin_native_logo_bg_v1';
+
 interface AdminConsoleProps {
   user: User | null;
   authReady: boolean;
@@ -218,6 +222,45 @@ export default function AdminConsole({
   const [brandingError, setBrandingError] = useState<string | null>(null);
   const [brandingSaved, setBrandingSaved] = useState(false);
   const logoInputRef = useRef<HTMLInputElement | null>(null);
+
+  // Native PRESENZA logo background preferences for Admin Console
+  const [showAdminLogoBg, setShowAdminLogoBg] = useState<boolean>(() => {
+    try {
+      const raw = window.localStorage.getItem(ADMIN_NATIVE_LOGO_STORAGE_KEY);
+      if (!raw) return true;
+      const parsed = JSON.parse(raw) as { enabled?: unknown };
+      return typeof parsed.enabled === 'boolean' ? parsed.enabled : true;
+    } catch {
+      return true;
+    }
+  });
+  const [adminLogoBgOpacity, setAdminLogoBgOpacity] = useState<number>(() => {
+    try {
+      const raw = window.localStorage.getItem(ADMIN_NATIVE_LOGO_STORAGE_KEY);
+      if (!raw) return 16;
+      const parsed = JSON.parse(raw) as { opacity?: unknown };
+      if (typeof parsed.opacity === 'number' && Number.isFinite(parsed.opacity)) {
+        return Math.min(45, Math.max(5, Math.round(parsed.opacity)));
+      }
+      return 16;
+    } catch {
+      return 16;
+    }
+  });
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(
+        ADMIN_NATIVE_LOGO_STORAGE_KEY,
+        JSON.stringify({
+          enabled: showAdminLogoBg,
+          opacity: adminLogoBgOpacity,
+        })
+      );
+    } catch {
+      // Ignore storage restrictions
+    }
+  }, [showAdminLogoBg, adminLogoBgOpacity]);
 
   useEffect(() => {
     setOrgNameInput(branding?.organizationName || '');
@@ -1503,14 +1546,31 @@ export default function AdminConsole({
     }
   };
 
+  const adminNativeLogoBackdrop = showAdminLogoBg ? (
+    <div
+      aria-hidden="true"
+      className="fixed inset-0 z-0 pointer-events-none select-none flex items-center justify-center overflow-hidden px-6"
+    >
+      <img
+        src={PRESENZA_NATIVE_LOGO_URL}
+        alt=""
+        style={{ opacity: adminLogoBgOpacity / 100 }}
+        className="w-[min(82vw,680px)] max-h-[76vh] object-contain mix-blend-multiply transition-opacity duration-200"
+      />
+    </div>
+  ) : null;
+
   // Loading auth state
   if (!authReady || checkingAdmin) {
     return (
-      <div className="max-w-md mx-auto px-4 py-20 text-center">
-        <Loader2 className="w-7 h-7 animate-spin text-blue-700 mx-auto" />
-        <p className="mt-3 text-sm text-slate-600">
-          Checking administrator session...
-        </p>
+      <div className="relative isolate min-h-[calc(100vh-10rem)]">
+        {adminNativeLogoBackdrop}
+        <div className="relative z-10 max-w-md mx-auto px-4 py-20 text-center">
+          <Loader2 className="w-7 h-7 animate-spin text-blue-700 mx-auto" />
+          <p className="mt-3 text-sm text-slate-600">
+            Checking administrator session...
+          </p>
+        </div>
       </div>
     );
   }
@@ -1518,55 +1578,62 @@ export default function AdminConsole({
   // Not signed in -> Administrator Login Screen
   if (!user) {
     return (
-      <div className="max-w-lg mx-auto px-4 py-12 sm:py-16">
-        <div className="bg-white border border-slate-200 rounded-2xl p-6 sm:p-8 text-center space-y-5">
-          <div className="w-12 h-12 rounded-xl bg-slate-100 text-slate-800 flex items-center justify-center mx-auto">
-            <Lock className="w-6 h-6" />
-          </div>
-          <div>
-            <h1 className="text-2xl font-bold text-slate-900">
-              Administrator Sign In
-            </h1>
-            <p className="mt-2 text-sm text-slate-600 leading-relaxed">
-              Sign in with an authorized teacher or administrator Google account. Participants check in directly via the attendance link or QR code without logging in.
-            </p>
-          </div>
-
-          {authError && (
-            <div
-              role="alert"
-              className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-xs text-rose-900 text-left space-y-1.5"
-            >
-              <div className="flex items-center justify-between gap-2">
-                <p className="font-semibold text-rose-950">{authError.title}</p>
-                <span className="font-mono-tabular text-[11px] text-rose-700">
-                  {authError.code}
-                </span>
-              </div>
-              <p className="leading-relaxed text-rose-800">{authError.message}</p>
-              {authError.helpSteps && authError.helpSteps.length > 0 && (
-                <ol className="list-decimal list-inside space-y-1 pt-1 text-rose-800">
-                  {authError.helpSteps.map((step, idx) => (
-                    <li key={idx}>{step}</li>
-                  ))}
-                </ol>
-              )}
+      <div className="relative isolate min-h-[calc(100vh-10rem)] flex items-center justify-center">
+        {adminNativeLogoBackdrop}
+        <div className="relative z-10 w-full max-w-lg mx-auto px-4 py-10 sm:py-14">
+          <div className="bg-white/90 backdrop-blur-xs border border-slate-200 rounded-2xl p-6 sm:p-8 text-center space-y-5 shadow-sm">
+            <div className="flex flex-col items-center gap-3">
+              <img
+                src={PRESENZA_NATIVE_LOGO_URL}
+                alt="PRESENZA Smart Attendance"
+                className="h-24 sm:h-28 w-auto object-contain mix-blend-multiply"
+              />
             </div>
-          )}
+            <div>
+              <h1 className="text-2xl font-bold text-slate-900">
+                Administrator Sign In
+              </h1>
+              <p className="mt-2 text-sm text-slate-600 leading-relaxed">
+                Sign in with an authorized teacher or administrator Google account. Participants check in directly via the attendance link or QR code without logging in.
+              </p>
+            </div>
 
-          <button
-            type="button"
-            onClick={handleGoogleSignIn}
-            disabled={signingIn}
-            className="w-full min-h-[48px] px-5 py-3 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-sm font-semibold transition-colors flex items-center justify-center gap-2.5 disabled:opacity-60"
-          >
-            {signingIn ? (
-              <Loader2 className="w-4 h-4 animate-spin" />
-            ) : (
-              <Users className="w-4 h-4" />
+            {authError && (
+              <div
+                role="alert"
+                className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-xs text-rose-900 text-left space-y-1.5"
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <p className="font-semibold text-rose-950">{authError.title}</p>
+                  <span className="font-mono-tabular text-[11px] text-rose-700">
+                    {authError.code}
+                  </span>
+                </div>
+                <p className="leading-relaxed text-rose-800">{authError.message}</p>
+                {authError.helpSteps && authError.helpSteps.length > 0 && (
+                  <ol className="list-decimal list-inside space-y-1 pt-1 text-rose-800">
+                    {authError.helpSteps.map((step, idx) => (
+                      <li key={idx}>{step}</li>
+                    ))}
+                  </ol>
+                )}
+              </div>
             )}
-            <span>{signingIn ? 'Signing in...' : 'Sign in with Google'}</span>
-          </button>
+
+            <button
+              type="button"
+              onClick={handleGoogleSignIn}
+              disabled={signingIn}
+              className="w-full min-h-[48px] px-5 py-3 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-sm font-semibold transition-colors flex items-center justify-center gap-2.5 disabled:opacity-60"
+            >
+              {signingIn ? (
+                <Loader2 className="w-4 h-4 animate-spin" />
+              ) : (
+                <Users className="w-4 h-4" />
+              )}
+              <span>{signingIn ? 'Signing in...' : 'Sign in with Google'}</span>
+            </button>
+          </div>
         </div>
       </div>
     );
@@ -1575,38 +1642,41 @@ export default function AdminConsole({
   // Signed in but not authorized as Admin
   if (!isAdmin) {
     return (
-      <div className="max-w-lg mx-auto px-4 py-12 sm:py-16">
-        <div className="bg-white border border-slate-200 rounded-2xl p-6 sm:p-8 text-center space-y-5">
-          <div className="w-12 h-12 rounded-xl bg-rose-50 text-rose-700 flex items-center justify-center mx-auto">
-            <ShieldAlert className="w-6 h-6" />
-          </div>
-          <div>
-            <h1 className="text-xl font-bold text-slate-900">
-              Administrator Access Restricted
-            </h1>
-            <p className="mt-2 text-sm text-slate-600">
-              Signed in as <span className="font-semibold">{user.email || 'Unknown account'}</span>.{' '}
-              {!user.emailVerified
-                ? 'This account email is not verified. Please sign in with a verified Google administrator account.'
-                : 'This account is not registered as an administrator for PRESENZA.'}
-            </p>
-          </div>
-          {authError && (
-            <div
-              role="alert"
-              className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-xs text-rose-800 text-left"
-            >
-              {authError.message}
+      <div className="relative isolate min-h-[calc(100vh-10rem)]">
+        {adminNativeLogoBackdrop}
+        <div className="relative z-10 max-w-lg mx-auto px-4 py-12 sm:py-16">
+          <div className="bg-white/90 backdrop-blur-xs border border-slate-200 rounded-2xl p-6 sm:p-8 text-center space-y-5 shadow-sm">
+            <div className="w-12 h-12 rounded-xl bg-rose-50 text-rose-700 flex items-center justify-center mx-auto">
+              <ShieldAlert className="w-6 h-6" />
             </div>
-          )}
-          <button
-            type="button"
-            onClick={() => void handleSignOut()}
-            className="min-h-[44px] px-5 py-2.5 rounded-xl border border-slate-300 bg-white text-sm font-semibold text-slate-800 hover:bg-slate-100 transition-colors inline-flex items-center gap-2"
-          >
-            <LogOut className="w-4 h-4" />
-            <span>Sign Out &amp; Switch Account</span>
-          </button>
+            <div>
+              <h1 className="text-xl font-bold text-slate-900">
+                Administrator Access Restricted
+              </h1>
+              <p className="mt-2 text-sm text-slate-600">
+                Signed in as <span className="font-semibold">{user.email || 'Unknown account'}</span>.{' '}
+                {!user.emailVerified
+                  ? 'This account email is not verified. Please sign in with a verified Google administrator account.'
+                  : 'This account is not registered as an administrator for PRESENZA.'}
+              </p>
+            </div>
+            {authError && (
+              <div
+                role="alert"
+                className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-xs text-rose-800 text-left"
+              >
+                {authError.message}
+              </div>
+            )}
+            <button
+              type="button"
+              onClick={() => void handleSignOut()}
+              className="min-h-[44px] px-5 py-2.5 rounded-xl border border-slate-300 bg-white text-sm font-semibold text-slate-800 hover:bg-slate-100 transition-colors inline-flex items-center gap-2"
+            >
+              <LogOut className="w-4 h-4" />
+              <span>Sign Out &amp; Switch Account</span>
+            </button>
+          </div>
         </div>
       </div>
     );
@@ -1614,7 +1684,9 @@ export default function AdminConsole({
 
   // Authenticated Admin Console
   return (
-    <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 sm:py-8 space-y-8">
+    <div className="relative isolate min-h-[calc(100vh-10rem)]">
+      {adminNativeLogoBackdrop}
+      <div className="relative z-10 max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 sm:py-8 space-y-8">
       {/* Top Admin Header */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-6 border-b border-slate-200">
         <div>
@@ -1693,7 +1765,7 @@ export default function AdminConsole({
 
       {/* Admin Module Switcher Tabs */}
       <nav
-        className="flex flex-wrap items-center gap-2 bg-white border border-slate-200 rounded-2xl p-1.5"
+        className="flex flex-wrap items-center gap-2 bg-white/85 backdrop-blur-xs border border-slate-200 rounded-2xl p-1.5"
         aria-label="Administrator modules"
       >
         <button
@@ -1826,7 +1898,7 @@ export default function AdminConsole({
       {currentSection === 'attendance' && (
         <>
       {/* School / Company Top-Left Branding Bar */}
-      <section className="bg-white border border-slate-200 rounded-2xl p-4 sm:p-5">
+      <section className="bg-white/85 backdrop-blur-xs border border-slate-200 rounded-2xl p-4 sm:p-5">
         <input
           ref={logoInputRef}
           type="file"
@@ -1978,11 +2050,61 @@ export default function AdminConsole({
             {brandingError}
           </div>
         )}
+
+        {/* Native PRESENZA Logo Admin Console Background Control */}
+        <div className="mt-4 pt-4 border-t border-slate-100 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="flex items-center gap-3 min-w-0">
+            <img
+              src={PRESENZA_NATIVE_LOGO_URL}
+              alt="PRESENZA Native Logo"
+              className="w-12 h-9 rounded-lg border border-slate-200 bg-white object-contain p-0.5 shrink-0"
+            />
+            <div className="min-w-0">
+              <div className="text-xs font-bold uppercase tracking-wider text-slate-700">
+                Admin Console Native Logo Background
+              </div>
+              <p className="text-xs text-slate-500">
+                Displays the official PRESENZA emblem as the watermark backdrop across the Admin Console.
+              </p>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-3 shrink-0">
+            <label className="inline-flex items-center gap-2 text-xs font-semibold text-slate-700 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={showAdminLogoBg}
+                onChange={(e) => setShowAdminLogoBg(e.target.checked)}
+                className="w-4 h-4 accent-blue-700 rounded cursor-pointer"
+              />
+              <span>{showAdminLogoBg ? 'Visible' : 'Hidden'}</span>
+            </label>
+
+            {showAdminLogoBg && (
+              <label className="min-h-[36px] px-3 py-1 rounded-xl border border-slate-200 bg-slate-50 text-xs font-semibold text-slate-700 inline-flex items-center gap-2">
+                <span>Opacity</span>
+                <input
+                  type="range"
+                  min={5}
+                  max={45}
+                  step={1}
+                  value={adminLogoBgOpacity}
+                  onChange={(e) => setAdminLogoBgOpacity(Number(e.target.value))}
+                  aria-label="Admin Console native logo background opacity"
+                  className="w-24 accent-blue-700 cursor-pointer"
+                />
+                <span className="font-mono-tabular w-8 text-right">
+                  {adminLogoBgOpacity}%
+                </span>
+              </label>
+            )}
+          </div>
+        </div>
       </section>
 
       {/* 4-Column KPI Strip */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        <div className="bg-white border border-slate-200 rounded-xl p-4 sm:p-5">
+        <div className="bg-white/85 backdrop-blur-xs border border-slate-200 rounded-xl p-4 sm:p-5">
           <div className="text-xs font-medium text-slate-500">
             Active Sessions
           </div>
@@ -1994,7 +2116,7 @@ export default function AdminConsole({
           </div>
         </div>
 
-        <div className="bg-white border border-slate-200 rounded-xl p-4 sm:p-5">
+        <div className="bg-white/85 backdrop-blur-xs border border-slate-200 rounded-xl p-4 sm:p-5">
           <div className="text-xs font-medium text-slate-500">
             Recorded Check-Ins
           </div>
@@ -2006,7 +2128,7 @@ export default function AdminConsole({
           </div>
         </div>
 
-        <div className="bg-white border border-slate-200 rounded-xl p-4 sm:p-5">
+        <div className="bg-white/85 backdrop-blur-xs border border-slate-200 rounded-xl p-4 sm:p-5">
           <div className="text-xs font-medium text-slate-500">On Time</div>
           <div className="mt-2 text-2xl sm:text-3xl font-bold font-mono-tabular text-emerald-700">
             {metrics.onTime}
@@ -2016,7 +2138,7 @@ export default function AdminConsole({
           </div>
         </div>
 
-        <div className="bg-white border border-slate-200 rounded-xl p-4 sm:p-5">
+        <div className="bg-white/85 backdrop-blur-xs border border-slate-200 rounded-xl p-4 sm:p-5">
           <div className="text-xs font-medium text-slate-500">Late Arrivals</div>
           <div className="mt-2 text-2xl sm:text-3xl font-bold font-mono-tabular text-amber-700">
             {metrics.late}
@@ -2030,7 +2152,7 @@ export default function AdminConsole({
       {/* Two-Column Workspace: Event & QR Management + Real-Time Arrival Feed */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
         {/* Left 7 Columns: Event Creation & QR Management */}
-        <section className="lg:col-span-7 bg-white border border-slate-200 rounded-2xl overflow-hidden">
+        <section className="lg:col-span-7 bg-white/88 backdrop-blur-xs border border-slate-200 rounded-2xl overflow-hidden">
           <div className="px-6 py-4 border-b border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div>
               <h2 className="text-lg font-bold text-slate-900">
@@ -3926,6 +4048,7 @@ export default function AdminConsole({
           onClose={() => setShowCertCustomizer(false)}
         />
       )}
+      </div>
     </div>
   );
 }

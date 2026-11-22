@@ -16,6 +16,9 @@ import { sanitizeEventIdParam } from './utils/qrUrl';
 
 type ViewMode = 'checkin' | 'feedback' | 'admin';
 
+const PRESENZA_NATIVE_LOGO_URL =
+  '/assets/aistudio/Logo_Presenza__Kehadiran_Cerdas_Beraksen_Emas_259b7478.png';
+
 function readInitialEventId(): string | null {
   const params = new URLSearchParams(window.location.search);
   const queryEvent = sanitizeEventIdParam(params.get('event'));
@@ -233,13 +236,11 @@ export default function App() {
               }}
               className="flex items-center gap-2.5 sm:gap-3 min-w-0 flex-1 md:flex-initial"
             >
-              {logoUrl && (
-                <img
-                  src={logoUrl}
-                  alt={orgName ? `${orgName} logo` : 'Organization logo'}
-                  className="h-9 w-9 sm:h-10 sm:w-10 rounded-lg object-contain bg-white border border-slate-200 p-0.5 shrink-0"
-                />
-              )}
+              <img
+                src={logoUrl || PRESENZA_NATIVE_LOGO_URL}
+                alt={orgName ? `${orgName} logo` : 'PRESENZA logo'}
+                className="h-9 w-9 sm:h-10 sm:w-10 rounded-lg object-contain bg-white border border-slate-200 p-0.5 shrink-0"
+              />
               <div className="min-w-0 flex flex-col leading-tight">
                 {orgName ? (
                   <>
@@ -399,7 +400,7 @@ export default function App() {
           )}
         </header>
 
-        <main className="flex-1">
+        <main className="flex-1 relative z-10">
           {view === 'checkin' ? (
             <ParticipantCheckIn
               requestedEventId={requestedEventId}
@@ -452,14 +453,47 @@ export default function App() {
           )}
         </main>
 
-        <footer className="border-t border-slate-200 bg-white py-4 px-4 sm:px-6 lg:px-8">
-          <div className="max-w-7xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-2 text-xs text-slate-500">
-            <span>
-              {orgName ? `${orgName} · ` : ''}PRESENZA · Workshops, Seminars &amp; Professional Development
-            </span>
-            <span>
-              Instant QR attendance check-in &amp; evaluation · No participant login required
-            </span>
+        <footer className="relative z-10 border-t border-slate-200 bg-white/95 backdrop-blur-xs py-5 px-4 sm:px-6 lg:px-8">
+          <div className="max-w-7xl mx-auto flex flex-col sm:flex-row items-start sm:items-end justify-between gap-4 text-xs text-slate-500">
+            <div className="space-y-1">
+              <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                {orgName && (
+                  <>
+                    <span className="font-semibold text-slate-700">
+                      {orgName}
+                    </span>
+                    <span aria-hidden="true" className="text-slate-300">
+                      ·
+                    </span>
+                  </>
+                )}
+                <span className="font-display font-extrabold tracking-tight text-slate-900">
+                  PRESENZA
+                </span>
+              </div>
+              <div className="text-[11px] font-bold uppercase tracking-wider text-blue-700">
+                DIGITAL ATTENDANCE SYSTEM
+              </div>
+              <p className="text-xs font-semibold text-slate-800">
+                Presence Made Simple.
+              </p>
+              <p className="text-xs text-slate-600">
+                A smarter way to check in, track attendance, and stay connected.
+              </p>
+              <div className="pt-0.5 text-[11px] font-bold tracking-widest text-slate-500 uppercase">
+                SMART • SIMPLE • SEAMLESS
+              </div>
+            </div>
+            <div className="flex flex-col items-start sm:items-end gap-2 sm:text-right">
+              <img
+                src={PRESENZA_NATIVE_LOGO_URL}
+                alt="PRESENZA Smart Attendance"
+                className="h-14 sm:h-16 w-auto object-contain mix-blend-multiply"
+              />
+              <span>
+                Instant QR attendance check-in &amp; evaluation · No participant login required
+              </span>
+            </div>
           </div>
         </footer>
         </div>

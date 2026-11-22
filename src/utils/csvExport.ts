@@ -101,6 +101,7 @@ export function exportFeedbackCsv(
     'Positive Feedback Selected',
     'Improvement Suggestions Selected',
     'Written Comments & Recommendations',
+    'Supporting Attachment',
     ...customPrompts.map((p) => `Question: ${p}`),
     'Submitted At (ISO)',
   ];
@@ -121,6 +122,9 @@ export function exportFeedbackCsv(
       .filter((s) => s.sentiment === 'improvement')
       .map((s) => s.text)
       .join(' | ');
+    const attachmentSummary = sub.attachment
+      ? `${sub.attachment.fileName} (${sub.attachment.mimeType})`
+      : '';
 
     return [
       escapeCsvCell(sub.eventTitle),
@@ -139,6 +143,7 @@ export function exportFeedbackCsv(
       escapeCsvCell(positiveTexts),
       escapeCsvCell(improvementTexts),
       escapeCsvCell(sub.writtenComment || ''),
+      escapeCsvCell(attachmentSummary),
       ...customPrompts.map((p) => escapeCsvCell(customAnswerMap.get(p) || '')),
       escapeCsvCell(serverIso),
     ].join(',');
