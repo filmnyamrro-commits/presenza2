@@ -1993,17 +1993,6 @@ export default function AdminConsole({
           <button
             type="button"
             onClick={() => {
-              setCertSettingsError(null);
-              setShowCertCustomizer(true);
-            }}
-            className="min-h-[44px] px-4 py-2 rounded-xl border border-amber-300 bg-amber-50 hover:bg-amber-100 text-amber-900 text-sm font-semibold transition-colors inline-flex items-center gap-2 whitespace-nowrap shrink-0"
-          >
-            <Palette className="w-4 h-4 text-amber-700" />
-            <span>Certificate Studio</span>
-          </button>
-          <button
-            type="button"
-            onClick={() => {
               setAdminManageError(null);
               setShowAdminsModal(true);
             }}
@@ -2084,7 +2073,7 @@ export default function AdminConsole({
           }`}
         >
           <MessageSquare className="w-4 h-4" />
-          <span>Feedback &amp; Evaluation ({feedbackSubmissions.length})</span>
+          <span>Feedback and Evaluation Recap ({feedbackSubmissions.length})</span>
         </button>
 
         <button

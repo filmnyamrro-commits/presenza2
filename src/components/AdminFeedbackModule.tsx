@@ -247,6 +247,22 @@ export default function AdminFeedbackModule({
     };
   }, [feedbackQrUrl]);
 
+  const submissionCountByEventId = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const sub of feedbackSubmissions) {
+      counts.set(sub.eventId, (counts.get(sub.eventId) ?? 0) + 1);
+    }
+    return counts;
+  }, [feedbackSubmissions]);
+
+  const selectedRecapEvent = useMemo(
+    () =>
+      filterEventId !== 'all'
+        ? events.find((e) => e.id === filterEventId) ?? null
+        : null,
+    [events, filterEventId]
+  );
+
   // Filter options derived from submissions + events
   const filterOptions = useMemo(() => {
     const dates = Array.from(
@@ -901,10 +917,10 @@ export default function AdminFeedbackModule({
       <div className="bg-white border border-slate-200 rounded-2xl p-4 sm:p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
           <h2 className="text-lg sm:text-xl font-bold text-slate-900">
-            Participant Feedback &amp; Evaluation
+            Feedback and Evaluation Recap
           </h2>
           <p className="text-xs text-slate-600 mt-0.5">
-            Track satisfaction scores, share event Feedback QR codes, customize questions &amp; statements, and schedule when feedback can be filled in.
+            Review feedback &amp; evaluation summaries for a specific event or across all events, export PDF/CSV reports, and customize questions or schedule.
           </p>
         </div>
 
@@ -925,7 +941,7 @@ export default function AdminFeedbackModule({
             }`}
           >
             <BarChart3 className="w-3.5 h-3.5 text-blue-700" />
-            <span>Feedback Dashboard ({feedbackSubmissions.length})</span>
+            <span>Recap Overview ({feedbackSubmissions.length})</span>
           </button>
           <button
             type="button"
@@ -946,6 +962,89 @@ export default function AdminFeedbackModule({
 
       {subTab === 'analytics' ? (
         <div className="space-y-6">
+          {/* Recap Scope Choice: Specific Event vs All Events */}
+          <section className="bg-white border border-slate-200 rounded-2xl p-4 sm:p-5 space-y-4">
+            <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+              <div className="space-y-1">
+                <div className="text-xs font-bold uppercase tracking-wider text-blue-700">
+                  Recap Event Scope
+                </div>
+                <div className="text-sm font-semibold text-slate-900">
+                  {selectedRecapEvent
+                    ? `${selectedRecapEvent.title} · ${selectedRecapEvent.eventDate} · ${selectedRecapEvent.venue}`
+                    : `All Events (${events.length} ${events.length === 1 ? 'session' : 'sessions'})`}
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2">
+                <div
+                  className="inline-flex rounded-xl border border-slate-200 bg-slate-100 p-1"
+                  role="group"
+                  aria-label="Choose all events or specific event"
+                >
+                  <button
+                    type="button"
+                    onClick={() => setFilterEventId('all')}
+                    className={`min-h-[36px] px-3 py-1 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap shrink-0 ${
+                      filterEventId === 'all'
+                        ? 'bg-white text-slate-900 shadow-xs'
+                        : 'text-slate-600 hover:text-slate-900'
+                    }`}
+                  >
+                    All Events ({feedbackSubmissions.length})
+                  </button>
+                  <button
+                    type="button"
+                    disabled={events.length === 0}
+                    onClick={() => {
+                      const targetId =
+                        filterEventId !== 'all'
+                          ? filterEventId
+                          : qrTargetEventId || events[0]?.id || 'all';
+                      setFilterEventId(targetId);
+                      if (targetId !== 'all') {
+                        setQrTargetEventId(targetId);
+                      }
+                    }}
+                    className={`min-h-[36px] px-3 py-1 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap shrink-0 disabled:opacity-50 ${
+                      filterEventId !== 'all'
+                        ? 'bg-white text-slate-900 shadow-xs'
+                        : 'text-slate-600 hover:text-slate-900'
+                    }`}
+                  >
+                    Specific Event
+                  </button>
+                </div>
+
+                <select
+                  value={filterEventId}
+                  onChange={(e) => {
+                    const nextId = e.target.value;
+                    setFilterEventId(nextId);
+                    if (nextId !== 'all') {
+                      setQrTargetEventId(nextId);
+                    }
+                  }}
+                  aria-label="Choose event or all events for feedback recap"
+                  className="min-h-[40px] px-3.5 py-2 text-xs sm:text-sm font-semibold bg-slate-50 border border-slate-300 rounded-xl text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-600 min-w-[230px] max-w-sm"
+                >
+                  <option value="all">
+                    All Events ({feedbackSubmissions.length} responses)
+                  </option>
+                  {events.map((ev) => {
+                    const count = submissionCountByEventId.get(ev.id) ?? 0;
+                    return (
+                      <option key={ev.id} value={ev.id}>
+                        {ev.title} ({ev.eventDate}) · {count} response
+                        {count === 1 ? '' : 's'}
+                      </option>
+                    );
+                  })}
+                </select>
+              </div>
+            </div>
+          </section>
+
           {/* Quick Feedback QR Share Strip */}
           {events.length > 0 && (
             <section className="bg-white border border-slate-200 rounded-2xl p-4 sm:p-5">
@@ -1198,14 +1297,22 @@ export default function AdminFeedbackModule({
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
               <select
                 value={filterEventId}
-                onChange={(e) => setFilterEventId(e.target.value)}
+                onChange={(e) => {
+                  const nextId = e.target.value;
+                  setFilterEventId(nextId);
+                  if (nextId !== 'all') {
+                    setQrTargetEventId(nextId);
+                  }
+                }}
                 aria-label="Filter feedback by event"
                 className="min-h-[40px] px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-xl text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-600"
               >
-                <option value="all">All Events</option>
+                <option value="all">
+                  All Events ({feedbackSubmissions.length})
+                </option>
                 {events.map((ev) => (
                   <option key={ev.id} value={ev.id}>
-                    {ev.title}
+                    {ev.title} ({submissionCountByEventId.get(ev.id) ?? 0})
                   </option>
                 ))}
               </select>
