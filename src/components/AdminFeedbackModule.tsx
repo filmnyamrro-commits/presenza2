@@ -49,7 +49,14 @@ import {
   type OrganizationBranding,
 } from '../types';
 import { exportFeedbackCsv } from '../utils/csvExport';
-import { formatLocalDateYmd, generateSafeId } from '../utils/dateTime';
+import {
+  format12hTo24h,
+  format24hPartsToString,
+  formatLocalDateYmd,
+  generateSafeId,
+  parse24hParts,
+  parse24hTo12h,
+} from '../utils/dateTime';
 import {
   buildDefaultFeedbackConfig,
   buildFeedbackConfigWritePayload,
@@ -61,6 +68,7 @@ import {
   mergeFeedbackConfig,
   parseIsoTimestampMs,
 } from '../utils/feedbackAndRecognitionDefaults';
+import { downloadFeedbackReportPdf } from '../utils/pdfExport';
 import { buildFeedbackQrUrl } from '../utils/qrUrl';
 import {
   deleteFeedbackAttachmentRecord,
@@ -130,6 +138,9 @@ export default function AdminFeedbackModule({
   );
   const [configError, setConfigError] = useState<string | null>(null);
   const [configSaved, setConfigSaved] = useState(false);
+  const [scheduleTimeFormat, setScheduleTimeFormat] = useState<'12h' | '24h'>(
+    '12h'
+  );
 
   // New inputs in Form Customizer
   const [newCriterionLabel, setNewCriterionLabel] = useState('');
@@ -750,6 +761,14 @@ export default function AdminFeedbackModule({
     });
   };
 
+  const clearScheduleEndpoint = (which: 'open' | 'close') => {
+    setDraftConfig((prev) =>
+      which === 'open'
+        ? { ...prev, openAtIso: '' }
+        : { ...prev, closeAtIso: '' }
+    );
+  };
+
   const handleQuickToggleFeedbackActive = async (
     targetEventId: string,
     nextActive: boolean
@@ -1128,6 +1147,37 @@ export default function AdminFeedbackModule({
                 <button
                   type="button"
                   disabled={filteredSubmissions.length === 0}
+                  onClick={() => {
+                    const selectedEv =
+                      filterEventId !== 'all'
+                        ? events.find((e) => e.id === filterEventId) ?? null
+                        : null;
+                    const eventsById = new Map(events.map((e) => [e.id, e]));
+                    const activeFilters = [
+                      filterDate !== 'all' ? `Date: ${filterDate}` : '',
+                      filterFacilitator !== 'all'
+                        ? `Facilitator: ${filterFacilitator}`
+                        : '',
+                      filterTopic !== 'all' ? `Topic: ${filterTopic}` : '',
+                    ]
+                      .filter(Boolean)
+                      .join(' · ');
+                    downloadFeedbackReportPdf(filteredSubmissions, {
+                      selectedEvent: selectedEv,
+                      eventsById,
+                      branding,
+                      filenamePrefix: selectedEv?.title || 'feedback-report',
+                      filterSummary: activeFilters,
+                    });
+                  }}
+                  className="min-h-[38px] px-3.5 py-1.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold transition-colors inline-flex items-center gap-1.5 whitespace-nowrap disabled:opacity-50"
+                >
+                  <FileText className="w-3.5 h-3.5" />
+                  <span>Download PDF</span>
+                </button>
+                <button
+                  type="button"
+                  disabled={filteredSubmissions.length === 0}
                   onClick={() =>
                     exportFeedbackCsv(
                       filteredSubmissions,
@@ -1137,7 +1187,7 @@ export default function AdminFeedbackModule({
                         : 'presenza-feedback-report'
                     )
                   }
-                  className="min-h-[38px] px-3.5 py-1.5 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-semibold transition-colors inline-flex items-center gap-1.5 disabled:opacity-50"
+                  className="min-h-[38px] px-3.5 py-1.5 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-semibold transition-colors inline-flex items-center gap-1.5 whitespace-nowrap disabled:opacity-50"
                 >
                   <Download className="w-3.5 h-3.5" />
                   <span>Export to Excel (CSV)</span>
@@ -1846,114 +1896,301 @@ export default function AdminFeedbackModule({
 
             {draftConfig.scheduleEnabled ? (
               <div className="space-y-4 pt-2 border-t border-blue-200/70">
-                <div className="flex flex-wrap items-center gap-2">
-                  <span className="text-[11px] font-semibold uppercase tracking-wider text-slate-500 mr-1">
-                    Quick Fill:
-                  </span>
-                  {configTargetId !== 'default' && (
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-[11px] font-semibold uppercase tracking-wider text-slate-500 mr-1">
+                      Quick Fill:
+                    </span>
+                    {configTargetId !== 'default' && (
+                      <button
+                        type="button"
+                        onClick={() => applySchedulePreset('event-window')}
+                        className="min-h-[32px] px-2.5 py-1 rounded-lg border border-slate-300 bg-white hover:bg-slate-100 text-xs font-medium text-slate-800"
+                      >
+                        Event Date &amp; Start (+2h)
+                      </button>
+                    )}
                     <button
                       type="button"
-                      onClick={() => applySchedulePreset('event-window')}
+                      onClick={() => applySchedulePreset('now-2h')}
                       className="min-h-[32px] px-2.5 py-1 rounded-lg border border-slate-300 bg-white hover:bg-slate-100 text-xs font-medium text-slate-800"
                     >
-                      Event Date &amp; Start (+2h)
+                      Open Now for 2 Hours
                     </button>
-                  )}
-                  <button
-                    type="button"
-                    onClick={() => applySchedulePreset('now-2h')}
-                    className="min-h-[32px] px-2.5 py-1 rounded-lg border border-slate-300 bg-white hover:bg-slate-100 text-xs font-medium text-slate-800"
+                    <button
+                      type="button"
+                      onClick={() => applySchedulePreset('today-workday')}
+                      className="min-h-[32px] px-2.5 py-1 rounded-lg border border-slate-300 bg-white hover:bg-slate-100 text-xs font-medium text-slate-800"
+                    >
+                      {scheduleTimeFormat === '12h'
+                        ? 'Today (08:00 AM – 05:00 PM)'
+                        : 'Today (08:00 – 17:00)'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => applySchedulePreset('clear')}
+                      className="min-h-[32px] px-2.5 py-1 rounded-lg border border-slate-200 bg-white hover:bg-rose-50 hover:text-rose-700 text-xs font-medium text-slate-600"
+                    >
+                      Clear Times
+                    </button>
+                  </div>
+
+                  <div
+                    className="inline-flex rounded-lg border border-slate-200 bg-white p-0.5 shrink-0"
+                    role="group"
+                    aria-label="Feedback schedule time format"
                   >
-                    Open Now for 2 Hours
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => applySchedulePreset('today-workday')}
-                    className="min-h-[32px] px-2.5 py-1 rounded-lg border border-slate-300 bg-white hover:bg-slate-100 text-xs font-medium text-slate-800"
-                  >
-                    Today (08:00 – 17:00)
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => applySchedulePreset('clear')}
-                    className="min-h-[32px] px-2.5 py-1 rounded-lg border border-slate-200 bg-white hover:bg-rose-50 hover:text-rose-700 text-xs font-medium text-slate-600"
-                  >
-                    Clear Times
-                  </button>
+                    <button
+                      type="button"
+                      onClick={() => setScheduleTimeFormat('12h')}
+                      className={`px-2.5 py-1 rounded-md text-[11px] font-semibold transition-colors ${
+                        scheduleTimeFormat === '12h'
+                          ? 'bg-blue-700 text-white shadow-xs'
+                          : 'text-slate-600 hover:text-slate-900'
+                      }`}
+                    >
+                      12-Hour (AM / PM)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setScheduleTimeFormat('24h')}
+                      className={`px-2.5 py-1 rounded-md text-[11px] font-semibold transition-colors ${
+                        scheduleTimeFormat === '24h'
+                          ? 'bg-blue-700 text-white shadow-xs'
+                          : 'text-slate-600 hover:text-slate-900'
+                      }`}
+                    >
+                      24-Hour
+                    </button>
+                  </div>
                 </div>
 
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  <div className="rounded-xl border border-slate-200 bg-white p-3.5 space-y-2">
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs font-bold text-slate-800">
-                        Opens At (Start Date &amp; Time)
-                      </span>
-                      <span className="text-[11px] text-slate-500">
-                        Optional
-                      </span>
-                    </div>
-                    <div className="grid grid-cols-2 gap-2">
-                      <input
-                        type="date"
-                        aria-label="Feedback opening date"
-                        value={openScheduleParts.date}
-                        onChange={(e) =>
-                          updateScheduleField('open', 'date', e.target.value)
-                        }
-                        className="min-h-[38px] px-2.5 py-1.5 text-xs sm:text-sm border border-slate-300 rounded-lg bg-slate-50 focus:outline-none focus:ring-2 focus:ring-blue-600"
-                      />
-                      <input
-                        type="time"
-                        aria-label="Feedback opening time"
-                        value={openScheduleParts.time}
-                        onChange={(e) =>
-                          updateScheduleField('open', 'time', e.target.value)
-                        }
-                        className="min-h-[38px] px-2.5 py-1.5 text-xs sm:text-sm border border-slate-300 rounded-lg bg-slate-50 focus:outline-none focus:ring-2 focus:ring-blue-600"
-                      />
-                    </div>
-                    <p className="text-[11px] text-slate-500">
-                      {draftConfig.openAtIso
-                        ? `Participants can enter starting ${formatScheduleDateTime(draftConfig.openAtIso)}`
-                        : 'Leave blank to allow submissions immediately.'}
-                    </p>
-                  </div>
+                  {(
+                    [
+                      {
+                        which: 'open' as const,
+                        title: 'Opens At (Start Date & Time)',
+                        parts: openScheduleParts,
+                        iso: draftConfig.openAtIso,
+                        fallbackTime: '08:00',
+                        emptyHint: 'Leave blank to allow submissions immediately.',
+                        setPrefix: 'Participants can enter starting',
+                      },
+                      {
+                        which: 'close' as const,
+                        title: 'Closes At (End Date & Time)',
+                        parts: closeScheduleParts,
+                        iso: draftConfig.closeAtIso,
+                        fallbackTime: '17:00',
+                        emptyHint:
+                          'Leave blank to keep open until the session is closed.',
+                        setPrefix: 'Submissions lock after',
+                      },
+                    ] as const
+                  ).map((endpoint) => {
+                    const effectiveTime =
+                      endpoint.parts.time || endpoint.fallbackTime;
+                    const p24 = parse24hParts(effectiveTime);
+                    const p12 = parse24hTo12h(effectiveTime);
+                    const isConfigured = Boolean(endpoint.iso);
 
-                  <div className="rounded-xl border border-slate-200 bg-white p-3.5 space-y-2">
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs font-bold text-slate-800">
-                        Closes At (End Date &amp; Time)
-                      </span>
-                      <span className="text-[11px] text-slate-500">
-                        Optional
-                      </span>
-                    </div>
-                    <div className="grid grid-cols-2 gap-2">
-                      <input
-                        type="date"
-                        aria-label="Feedback closing date"
-                        value={closeScheduleParts.date}
-                        onChange={(e) =>
-                          updateScheduleField('close', 'date', e.target.value)
-                        }
-                        className="min-h-[38px] px-2.5 py-1.5 text-xs sm:text-sm border border-slate-300 rounded-lg bg-slate-50 focus:outline-none focus:ring-2 focus:ring-blue-600"
-                      />
-                      <input
-                        type="time"
-                        aria-label="Feedback closing time"
-                        value={closeScheduleParts.time}
-                        onChange={(e) =>
-                          updateScheduleField('close', 'time', e.target.value)
-                        }
-                        className="min-h-[38px] px-2.5 py-1.5 text-xs sm:text-sm border border-slate-300 rounded-lg bg-slate-50 focus:outline-none focus:ring-2 focus:ring-blue-600"
-                      />
-                    </div>
-                    <p className="text-[11px] text-slate-500">
-                      {draftConfig.closeAtIso
-                        ? `Submissions lock after ${formatScheduleDateTime(draftConfig.closeAtIso)}`
-                        : 'Leave blank to keep open until the session is closed.'}
-                    </p>
-                  </div>
+                    return (
+                      <div
+                        key={endpoint.which}
+                        className="rounded-xl border border-slate-200 bg-white p-3.5 space-y-2.5"
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="text-xs font-bold text-slate-800">
+                            {endpoint.title}
+                          </span>
+                          <div className="flex items-center gap-2">
+                            {isConfigured && (
+                              <span className="font-mono-tabular text-[11px] text-slate-500">
+                                {scheduleTimeFormat === '12h'
+                                  ? `24h: ${effectiveTime}`
+                                  : `${String(p12.hour12).padStart(2, '0')}:${String(
+                                      p12.minute
+                                    ).padStart(2, '0')} ${p12.period}`}
+                              </span>
+                            )}
+                            {isConfigured ? (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  clearScheduleEndpoint(endpoint.which)
+                                }
+                                className="text-[11px] font-semibold text-rose-600 hover:underline"
+                              >
+                                Clear
+                              </button>
+                            ) : (
+                              <span className="text-[11px] text-slate-500">
+                                Optional
+                              </span>
+                            )}
+                          </div>
+                        </div>
+
+                        <div className="space-y-2">
+                          <input
+                            type="date"
+                            aria-label={`Feedback ${endpoint.which}ing date`}
+                            value={endpoint.parts.date}
+                            onChange={(e) =>
+                              updateScheduleField(
+                                endpoint.which,
+                                'date',
+                                e.target.value
+                              )
+                            }
+                            className="w-full min-h-[38px] px-2.5 py-1.5 text-xs sm:text-sm font-mono-tabular border border-slate-300 rounded-lg bg-slate-50 focus:outline-none focus:ring-2 focus:ring-blue-600"
+                          />
+
+                          {scheduleTimeFormat === '12h' ? (
+                            <div className="flex items-center gap-1.5">
+                              <select
+                                aria-label={`Feedback ${endpoint.which}ing hour (12-hour)`}
+                                value={p12.hour12}
+                                onChange={(e) =>
+                                  updateScheduleField(
+                                    endpoint.which,
+                                    'time',
+                                    format12hTo24h(
+                                      Number(e.target.value),
+                                      p12.minute,
+                                      p12.period
+                                    )
+                                  )
+                                }
+                                className="flex-1 min-w-[60px] min-h-[38px] px-2 py-1.5 text-xs sm:text-sm font-mono-tabular bg-slate-50 border border-slate-300 rounded-lg text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-600"
+                              >
+                                {Array.from({ length: 12 }, (_, idx) => {
+                                  const h = idx + 1;
+                                  return (
+                                    <option key={h} value={h}>
+                                      {String(h).padStart(2, '0')}
+                                    </option>
+                                  );
+                                })}
+                              </select>
+                              <span className="font-mono-tabular font-bold text-slate-500">
+                                :
+                              </span>
+                              <select
+                                aria-label={`Feedback ${endpoint.which}ing minute`}
+                                value={p12.minute}
+                                onChange={(e) =>
+                                  updateScheduleField(
+                                    endpoint.which,
+                                    'time',
+                                    format12hTo24h(
+                                      p12.hour12,
+                                      Number(e.target.value),
+                                      p12.period
+                                    )
+                                  )
+                                }
+                                className="flex-1 min-w-[60px] min-h-[38px] px-2 py-1.5 text-xs sm:text-sm font-mono-tabular bg-slate-50 border border-slate-300 rounded-lg text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-600"
+                              >
+                                {Array.from({ length: 60 }, (_, m) => (
+                                  <option key={m} value={m}>
+                                    {String(m).padStart(2, '0')}
+                                  </option>
+                                ))}
+                              </select>
+                              <div
+                                className="inline-flex rounded-lg border border-slate-300 bg-white overflow-hidden shrink-0"
+                                role="group"
+                                aria-label={`Feedback ${endpoint.which}ing AM or PM`}
+                              >
+                                {(['AM', 'PM'] as const).map((periodOption) => (
+                                  <button
+                                    key={periodOption}
+                                    type="button"
+                                    onClick={() =>
+                                      updateScheduleField(
+                                        endpoint.which,
+                                        'time',
+                                        format12hTo24h(
+                                          p12.hour12,
+                                          p12.minute,
+                                          periodOption
+                                        )
+                                      )
+                                    }
+                                    className={`min-h-[36px] px-2.5 text-xs font-bold transition-colors ${
+                                      p12.period === periodOption
+                                        ? 'bg-blue-700 text-white'
+                                        : 'text-slate-700 hover:bg-slate-100'
+                                    }`}
+                                  >
+                                    {periodOption}
+                                  </button>
+                                ))}
+                              </div>
+                            </div>
+                          ) : (
+                            <div className="flex items-center gap-1.5">
+                              <select
+                                aria-label={`Feedback ${endpoint.which}ing hour (24-hour)`}
+                                value={p24.hour24}
+                                onChange={(e) =>
+                                  updateScheduleField(
+                                    endpoint.which,
+                                    'time',
+                                    format24hPartsToString(
+                                      Number(e.target.value),
+                                      p24.minute
+                                    )
+                                  )
+                                }
+                                className="flex-1 min-h-[38px] px-2.5 py-1.5 text-xs sm:text-sm font-mono-tabular bg-slate-50 border border-slate-300 rounded-lg text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-600"
+                              >
+                                {Array.from({ length: 24 }, (_, h) => (
+                                  <option key={h} value={h}>
+                                    {String(h).padStart(2, '0')}
+                                  </option>
+                                ))}
+                              </select>
+                              <span className="font-mono-tabular font-bold text-slate-500">
+                                :
+                              </span>
+                              <select
+                                aria-label={`Feedback ${endpoint.which}ing minute (24-hour)`}
+                                value={p24.minute}
+                                onChange={(e) =>
+                                  updateScheduleField(
+                                    endpoint.which,
+                                    'time',
+                                    format24hPartsToString(
+                                      p24.hour24,
+                                      Number(e.target.value)
+                                    )
+                                  )
+                                }
+                                className="flex-1 min-h-[38px] px-2.5 py-1.5 text-xs sm:text-sm font-mono-tabular bg-slate-50 border border-slate-300 rounded-lg text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-600"
+                              >
+                                {Array.from({ length: 60 }, (_, m) => (
+                                  <option key={m} value={m}>
+                                    {String(m).padStart(2, '0')}
+                                  </option>
+                                ))}
+                              </select>
+                            </div>
+                          )}
+                        </div>
+
+                        <p className="text-[11px] text-slate-500">
+                          {endpoint.iso
+                            ? `${endpoint.setPrefix} ${formatScheduleDateTime(
+                                endpoint.iso
+                              )}`
+                            : endpoint.emptyHint}
+                        </p>
+                      </div>
+                    );
+                  })}
                 </div>
 
                 <div className="grid grid-cols-1 lg:grid-cols-12 gap-3 items-center">

@@ -470,12 +470,13 @@ export function formatScheduleDateTime(isoOrDate: string | Date): string {
   const date =
     typeof isoOrDate === 'string' ? new Date(isoOrDate) : isoOrDate;
   if (Number.isNaN(date.getTime())) return '';
-  return date.toLocaleString(undefined, {
+  return date.toLocaleString('en-US', {
     year: 'numeric',
     month: 'short',
     day: 'numeric',
     hour: '2-digit',
     minute: '2-digit',
+    hour12: true,
   });
 }
 

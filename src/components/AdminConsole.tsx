@@ -309,6 +309,9 @@ export default function AdminConsole({
   const [evFeedbackCloseTime, setEvFeedbackCloseTime] = useState<string>('');
   const [evFeedbackClosedMessage, setEvFeedbackClosedMessage] =
     useState<string>('');
+  const [evFeedbackTimeFormat, setEvFeedbackTimeFormat] = useState<
+    '12h' | '24h'
+  >('12h');
   const [savingEvent, setSavingEvent] = useState(false);
   const [eventFormError, setEventFormError] = useState<string | null>(null);
 
@@ -3740,94 +3743,274 @@ export default function AdminConsole({
 
                     {evFeedbackScheduleEnabled ? (
                       <div className="space-y-3 pt-2 border-t border-blue-200/70">
-                        <div className="flex flex-wrap items-center gap-1.5">
-                          <span className="text-[11px] font-semibold uppercase tracking-wider text-slate-500 mr-1">
-                            Quick Fill:
-                          </span>
-                          <button
-                            type="button"
-                            onClick={() =>
-                              applyModalFeedbackPreset('session-window')
-                            }
-                            className="min-h-[30px] px-2.5 py-1 rounded-lg border border-slate-300 bg-white hover:bg-slate-100 text-[11px] font-semibold text-slate-800"
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            <span className="text-[11px] font-semibold uppercase tracking-wider text-slate-500 mr-1">
+                              Quick Fill:
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                applyModalFeedbackPreset('session-window')
+                              }
+                              className="min-h-[30px] px-2.5 py-1 rounded-lg border border-slate-300 bg-white hover:bg-slate-100 text-[11px] font-semibold text-slate-800"
+                            >
+                              Session Start (+2h)
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                applyModalFeedbackPreset('last-30m')
+                              }
+                              className="min-h-[30px] px-2.5 py-1 rounded-lg border border-slate-300 bg-white hover:bg-slate-100 text-[11px] font-semibold text-slate-800"
+                            >
+                              Last 30 Mins (of 2h)
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => applyModalFeedbackPreset('today')}
+                              className="min-h-[30px] px-2.5 py-1 rounded-lg border border-slate-300 bg-white hover:bg-slate-100 text-[11px] font-semibold text-slate-800"
+                            >
+                              {evFeedbackTimeFormat === '12h'
+                                ? 'Full Day (08:00 AM–05:00 PM)'
+                                : 'Full Day (08:00–17:00)'}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => applyModalFeedbackPreset('clear')}
+                              className="min-h-[30px] px-2.5 py-1 rounded-lg border border-slate-200 bg-white hover:bg-rose-50 hover:text-rose-700 text-[11px] font-medium text-slate-600"
+                            >
+                              Clear
+                            </button>
+                          </div>
+
+                          <div
+                            className="inline-flex rounded-lg border border-slate-200 bg-white p-0.5 shrink-0"
+                            role="group"
+                            aria-label="Modal feedback schedule time format"
                           >
-                            Session Start (+2h)
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => applyModalFeedbackPreset('last-30m')}
-                            className="min-h-[30px] px-2.5 py-1 rounded-lg border border-slate-300 bg-white hover:bg-slate-100 text-[11px] font-semibold text-slate-800"
-                          >
-                            Last 30 Mins (of 2h)
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => applyModalFeedbackPreset('today')}
-                            className="min-h-[30px] px-2.5 py-1 rounded-lg border border-slate-300 bg-white hover:bg-slate-100 text-[11px] font-semibold text-slate-800"
-                          >
-                            Full Day (08:00–17:00)
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => applyModalFeedbackPreset('clear')}
-                            className="min-h-[30px] px-2.5 py-1 rounded-lg border border-slate-200 bg-white hover:bg-rose-50 hover:text-rose-700 text-[11px] font-medium text-slate-600"
-                          >
-                            Clear
-                          </button>
+                            <button
+                              type="button"
+                              onClick={() => setEvFeedbackTimeFormat('12h')}
+                              className={`px-2 py-1 rounded-md text-[11px] font-semibold transition-colors ${
+                                evFeedbackTimeFormat === '12h'
+                                  ? 'bg-blue-700 text-white shadow-xs'
+                                  : 'text-slate-600 hover:text-slate-900'
+                              }`}
+                            >
+                              12-Hour (AM / PM)
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setEvFeedbackTimeFormat('24h')}
+                              className={`px-2 py-1 rounded-md text-[11px] font-semibold transition-colors ${
+                                evFeedbackTimeFormat === '24h'
+                                  ? 'bg-blue-700 text-white shadow-xs'
+                                  : 'text-slate-600 hover:text-slate-900'
+                              }`}
+                            >
+                              24-Hour
+                            </button>
+                          </div>
                         </div>
 
                         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                          <div className="rounded-lg border border-slate-200 bg-white p-2.5 space-y-1.5">
-                            <span className="block text-[11px] font-bold text-slate-800">
-                              Feedback Opens At
-                            </span>
-                            <div className="grid grid-cols-2 gap-1.5">
-                              <input
-                                type="date"
-                                aria-label="Session feedback opening date"
-                                value={evFeedbackOpenDate}
-                                onChange={(e) =>
-                                  setEvFeedbackOpenDate(e.target.value)
-                                }
-                                className="min-h-[36px] px-2 py-1 text-xs border border-slate-300 rounded-lg bg-slate-50 focus:outline-none focus:ring-2 focus:ring-blue-600"
-                              />
-                              <input
-                                type="time"
-                                aria-label="Session feedback opening time"
-                                value={evFeedbackOpenTime}
-                                onChange={(e) =>
-                                  setEvFeedbackOpenTime(e.target.value)
-                                }
-                                className="min-h-[36px] px-2 py-1 text-xs border border-slate-300 rounded-lg bg-slate-50 focus:outline-none focus:ring-2 focus:ring-blue-600"
-                              />
-                            </div>
-                          </div>
+                          {(
+                            [
+                              {
+                                key: 'open' as const,
+                                label: 'Feedback Opens At',
+                                dateVal: evFeedbackOpenDate,
+                                setDateVal: setEvFeedbackOpenDate,
+                                timeVal: evFeedbackOpenTime || '08:00',
+                                setTimeVal: (val: string) => {
+                                  if (!evFeedbackOpenDate) {
+                                    setEvFeedbackOpenDate(
+                                      evDate || formatLocalDateYmd(new Date())
+                                    );
+                                  }
+                                  setEvFeedbackOpenTime(val);
+                                },
+                              },
+                              {
+                                key: 'close' as const,
+                                label: 'Feedback Closes At',
+                                dateVal: evFeedbackCloseDate,
+                                setDateVal: setEvFeedbackCloseDate,
+                                timeVal: evFeedbackCloseTime || '17:00',
+                                setTimeVal: (val: string) => {
+                                  if (!evFeedbackCloseDate) {
+                                    setEvFeedbackCloseDate(
+                                      evDate || formatLocalDateYmd(new Date())
+                                    );
+                                  }
+                                  setEvFeedbackCloseTime(val);
+                                },
+                              },
+                            ] as const
+                          ).map((slot) => {
+                            const p24 = parse24hParts(slot.timeVal);
+                            const p12 = parse24hTo12h(slot.timeVal);
 
-                          <div className="rounded-lg border border-slate-200 bg-white p-2.5 space-y-1.5">
-                            <span className="block text-[11px] font-bold text-slate-800">
-                              Feedback Closes At
-                            </span>
-                            <div className="grid grid-cols-2 gap-1.5">
-                              <input
-                                type="date"
-                                aria-label="Session feedback closing date"
-                                value={evFeedbackCloseDate}
-                                onChange={(e) =>
-                                  setEvFeedbackCloseDate(e.target.value)
-                                }
-                                className="min-h-[36px] px-2 py-1 text-xs border border-slate-300 rounded-lg bg-slate-50 focus:outline-none focus:ring-2 focus:ring-blue-600"
-                              />
-                              <input
-                                type="time"
-                                aria-label="Session feedback closing time"
-                                value={evFeedbackCloseTime}
-                                onChange={(e) =>
-                                  setEvFeedbackCloseTime(e.target.value)
-                                }
-                                className="min-h-[36px] px-2 py-1 text-xs border border-slate-300 rounded-lg bg-slate-50 focus:outline-none focus:ring-2 focus:ring-blue-600"
-                              />
-                            </div>
-                          </div>
+                            return (
+                              <div
+                                key={slot.key}
+                                className="rounded-lg border border-slate-200 bg-white p-2.5 space-y-2"
+                              >
+                                <div className="flex items-center justify-between gap-2">
+                                  <span className="text-[11px] font-bold text-slate-800">
+                                    {slot.label}
+                                  </span>
+                                  <span className="font-mono-tabular text-[10px] text-slate-500">
+                                    {evFeedbackTimeFormat === '12h'
+                                      ? `24h: ${slot.timeVal}`
+                                      : `${String(p12.hour12).padStart(
+                                          2,
+                                          '0'
+                                        )}:${String(p12.minute).padStart(
+                                          2,
+                                          '0'
+                                        )} ${p12.period}`}
+                                  </span>
+                                </div>
+
+                                <input
+                                  type="date"
+                                  aria-label={`Session feedback ${slot.key}ing date`}
+                                  value={slot.dateVal}
+                                  onChange={(e) =>
+                                    slot.setDateVal(e.target.value)
+                                  }
+                                  className="w-full min-h-[36px] px-2 py-1 text-xs font-mono-tabular border border-slate-300 rounded-lg bg-slate-50 focus:outline-none focus:ring-2 focus:ring-blue-600"
+                                />
+
+                                {evFeedbackTimeFormat === '12h' ? (
+                                  <div className="flex items-center gap-1">
+                                    <select
+                                      aria-label={`Session feedback ${slot.key}ing hour (12-hour)`}
+                                      value={p12.hour12}
+                                      onChange={(e) =>
+                                        slot.setTimeVal(
+                                          format12hTo24h(
+                                            Number(e.target.value),
+                                            p12.minute,
+                                            p12.period
+                                          )
+                                        )
+                                      }
+                                      className="flex-1 min-w-[52px] min-h-[36px] px-1.5 py-1 text-xs font-mono-tabular bg-slate-50 border border-slate-300 rounded-lg text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-600"
+                                    >
+                                      {Array.from({ length: 12 }, (_, idx) => {
+                                        const h = idx + 1;
+                                        return (
+                                          <option key={h} value={h}>
+                                            {String(h).padStart(2, '0')}
+                                          </option>
+                                        );
+                                      })}
+                                    </select>
+                                    <span className="font-mono-tabular font-bold text-slate-500">
+                                      :
+                                    </span>
+                                    <select
+                                      aria-label={`Session feedback ${slot.key}ing minute`}
+                                      value={p12.minute}
+                                      onChange={(e) =>
+                                        slot.setTimeVal(
+                                          format12hTo24h(
+                                            p12.hour12,
+                                            Number(e.target.value),
+                                            p12.period
+                                          )
+                                        )
+                                      }
+                                      className="flex-1 min-w-[52px] min-h-[36px] px-1.5 py-1 text-xs font-mono-tabular bg-slate-50 border border-slate-300 rounded-lg text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-600"
+                                    >
+                                      {Array.from({ length: 60 }, (_, m) => (
+                                        <option key={m} value={m}>
+                                          {String(m).padStart(2, '0')}
+                                        </option>
+                                      ))}
+                                    </select>
+                                    <div
+                                      className="inline-flex rounded-lg border border-slate-300 bg-white overflow-hidden shrink-0"
+                                      role="group"
+                                      aria-label={`Session feedback ${slot.key}ing AM or PM`}
+                                    >
+                                      {(['AM', 'PM'] as const).map(
+                                        (periodOption) => (
+                                          <button
+                                            key={periodOption}
+                                            type="button"
+                                            onClick={() =>
+                                              slot.setTimeVal(
+                                                format12hTo24h(
+                                                  p12.hour12,
+                                                  p12.minute,
+                                                  periodOption
+                                                )
+                                              )
+                                            }
+                                            className={`min-h-[34px] px-2 text-[11px] font-bold transition-colors ${
+                                              p12.period === periodOption
+                                                ? 'bg-blue-700 text-white'
+                                                : 'text-slate-700 hover:bg-slate-100'
+                                            }`}
+                                          >
+                                            {periodOption}
+                                          </button>
+                                        )
+                                      )}
+                                    </div>
+                                  </div>
+                                ) : (
+                                  <div className="flex items-center gap-1">
+                                    <select
+                                      aria-label={`Session feedback ${slot.key}ing hour (24-hour)`}
+                                      value={p24.hour24}
+                                      onChange={(e) =>
+                                        slot.setTimeVal(
+                                          format24hPartsToString(
+                                            Number(e.target.value),
+                                            p24.minute
+                                          )
+                                        )
+                                      }
+                                      className="flex-1 min-h-[36px] px-2 py-1 text-xs font-mono-tabular bg-slate-50 border border-slate-300 rounded-lg text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-600"
+                                    >
+                                      {Array.from({ length: 24 }, (_, h) => (
+                                        <option key={h} value={h}>
+                                          {String(h).padStart(2, '0')}
+                                        </option>
+                                      ))}
+                                    </select>
+                                    <span className="font-mono-tabular font-bold text-slate-500">
+                                      :
+                                    </span>
+                                    <select
+                                      aria-label={`Session feedback ${slot.key}ing minute (24-hour)`}
+                                      value={p24.minute}
+                                      onChange={(e) =>
+                                        slot.setTimeVal(
+                                          format24hPartsToString(
+                                            p24.hour24,
+                                            Number(e.target.value)
+                                          )
+                                        )
+                                      }
+                                      className="flex-1 min-h-[36px] px-2 py-1 text-xs font-mono-tabular bg-slate-50 border border-slate-300 rounded-lg text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-600"
+                                    >
+                                      {Array.from({ length: 60 }, (_, m) => (
+                                        <option key={m} value={m}>
+                                          {String(m).padStart(2, '0')}
+                                        </option>
+                                      ))}
+                                    </select>
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })}
                         </div>
 
                         <div>

@@ -7,6 +7,7 @@ import type {
   CertificateSettings,
   CertificateThemeId,
   EventRecord,
+  FeedbackSubmissionRecord,
   IssuedCertificateRecord,
   OrganizationBranding,
   RecognitionTemplateConfig,
@@ -1629,3 +1630,538 @@ export function printRecognitionCertificatesPdf(
   };
   document.body.appendChild(iframe);
 }
+
+export interface FeedbackPdfReportOptions {
+  selectedEvent?: EventRecord | null;
+  eventsById?: Map<string, EventRecord>;
+  branding?: OrganizationBranding | null;
+  filenamePrefix?: string;
+  filterSummary?: string;
+}
+
+export function downloadFeedbackReportPdf(
+  submissions: FeedbackSubmissionRecord[],
+  options: FeedbackPdfReportOptions = {}
+): void {
+  const {
+    selectedEvent = null,
+    eventsById,
+    branding = null,
+    filenamePrefix = 'presenza-feedback-report',
+    filterSummary = '',
+  } = options;
+
+  const doc = new jsPDF({
+    orientation: 'portrait',
+    unit: 'mm',
+    format: 'a4',
+  });
+
+  const pageWidth = doc.internal.pageSize.getWidth();
+  const pageHeight = doc.internal.pageSize.getHeight();
+  const margin = 14;
+  const contentWidth = pageWidth - margin * 2;
+  const orgName = branding?.organizationName?.trim() || '';
+
+  // Auto-resolve event when all rows belong to a single event
+  let effectiveEvent: EventRecord | null = selectedEvent;
+  if (!effectiveEvent && eventsById && submissions.length > 0) {
+    const uniqueEventIds = Array.from(
+      new Set(submissions.map((s) => s.eventId))
+    );
+    if (uniqueEventIds.length === 1) {
+      effectiveEvent = eventsById.get(uniqueEventIds[0]) ?? null;
+    }
+  }
+
+  const headerTitle = effectiveEvent
+    ? `${effectiveEvent.title} — Feedback & Evaluation`
+    : submissions.length > 0 &&
+      new Set(submissions.map((s) => s.eventId)).size === 1
+    ? `${submissions[0].eventTitle} — Feedback & Evaluation`
+    : 'All Recorded Events — Feedback & Evaluation Report';
+
+  const generatedLabel = `Generated: ${new Date().toLocaleString('en-US', {
+    dateStyle: 'medium',
+    timeStyle: 'short',
+    hour12: true,
+  })}`;
+
+  const hasLogo = Boolean(branding?.logoDataUrl);
+  const textStartX = hasLogo ? margin + 17.5 : margin;
+  const textAvailableWidth = hasLogo ? contentWidth - 17.5 : contentWidth;
+
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(14);
+  const titleLines = doc
+    .splitTextToSize(headerTitle, textAvailableWidth)
+    .slice(0, 2);
+  const bannerHeight = titleLines.length > 1 ? 35 : 29;
+
+  doc.setFillColor(15, 23, 42); // #0F172A
+  doc.rect(0, 0, pageWidth, bannerHeight, 'F');
+
+  if (hasLogo && branding?.logoDataUrl) {
+    try {
+      doc.setFillColor(255, 255, 255);
+      doc.roundedRect(margin, 5.5, 14, 14, 1.5, 1.5, 'F');
+      doc.addImage(
+        branding.logoDataUrl,
+        detectImageFormat(branding.logoDataUrl),
+        margin + 0.8,
+        6.3,
+        12.4,
+        12.4
+      );
+    } catch {
+      // Skip malformed logo
+    }
+  }
+
+  const kickerPrefix = orgName
+    ? `${orgName} · PRESENZA FEEDBACK`
+    : 'PRESENZA · FEEDBACK & EVALUATION REPORT';
+  const kickerText = doc.splitTextToSize(
+    kickerPrefix,
+    Math.max(50, textAvailableWidth - 52)
+  )[0];
+
+  doc.setTextColor(147, 197, 253);
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(8);
+  doc.text(kickerText, textStartX, 8.5);
+
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(8);
+  doc.setTextColor(203, 213, 225);
+  doc.text(generatedLabel, pageWidth - margin, 8.5, { align: 'right' });
+
+  doc.setTextColor(255, 255, 255);
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(14);
+  doc.text(titleLines, textStartX, 16.5);
+
+  let cursorY = bannerHeight + 6;
+
+  // Session & Filter Summary Card
+  if (effectiveEvent || filterSummary) {
+    const infoLines: string[] = [];
+    if (effectiveEvent) {
+      infoLines.push(
+        `Session: ${effectiveEvent.category || 'Workshop'}  ·  Venue: ${
+          effectiveEvent.venue || '—'
+        }  ·  Date: ${effectiveEvent.eventDate || '—'}`
+      );
+      if (effectiveEvent.facilitators || effectiveEvent.topic) {
+        infoLines.push(
+          [
+            effectiveEvent.facilitators
+              ? `Facilitators: ${effectiveEvent.facilitators}`
+              : '',
+            effectiveEvent.topic ? `Topic: ${effectiveEvent.topic}` : '',
+          ]
+            .filter(Boolean)
+            .join('  ·  ')
+        );
+      }
+    }
+    if (filterSummary) {
+      infoLines.push(`Applied Filters: ${filterSummary}`);
+    }
+
+    const wrappedInfo = infoLines.flatMap((l) =>
+      doc.splitTextToSize(l, contentWidth - 8)
+    );
+    const infoHeight = 5 + wrappedInfo.length * 4.4;
+    doc.setDrawColor(203, 213, 225);
+    doc.setFillColor(248, 250, 252);
+    doc.roundedRect(margin, cursorY, contentWidth, infoHeight, 2, 2, 'FD');
+
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(8);
+    doc.setTextColor(51, 65, 85);
+    doc.text(wrappedInfo, margin + 4, cursorY + 5);
+    cursorY += infoHeight + 5;
+  }
+
+  // Compute Summary KPIs & Criterion Aggregation
+  const totalResponses = submissions.length;
+  const ratedSubs = submissions.filter((s) => s.averageRating > 0);
+  const overallAvg =
+    ratedSubs.length > 0
+      ? ratedSubs.reduce((sum, s) => sum + s.averageRating, 0) / ratedSubs.length
+      : 0;
+  let positiveTicks = 0;
+  let improvementTicks = 0;
+  let commentCount = 0;
+
+  const criterionAgg = new Map<
+    string,
+    { label: string; sum: number; count: number; dist: [number, number, number, number, number] }
+  >();
+  const positiveFreq = new Map<string, number>();
+  const improvementFreq = new Map<string, number>();
+
+  for (const sub of submissions) {
+    if (sub.writtenComment && sub.writtenComment.trim().length > 0) {
+      commentCount += 1;
+    }
+    for (const r of sub.ratings) {
+      const key = r.label || r.criterionId;
+      const entry = criterionAgg.get(key) || {
+        label: r.label,
+        sum: 0,
+        count: 0,
+        dist: [0, 0, 0, 0, 0],
+      };
+      entry.sum += r.score;
+      entry.count += 1;
+      const starIdx = Math.min(5, Math.max(1, Math.round(r.score))) - 1;
+      entry.dist[starIdx] += 1;
+      criterionAgg.set(key, entry);
+    }
+    for (const st of sub.selectedStatements) {
+      if (st.sentiment === 'improvement') {
+        improvementTicks += 1;
+        improvementFreq.set(st.text, (improvementFreq.get(st.text) ?? 0) + 1);
+      } else {
+        positiveTicks += 1;
+        positiveFreq.set(st.text, (positiveFreq.get(st.text) ?? 0) + 1);
+      }
+    }
+  }
+
+  const boxGap = 4;
+  const boxWidth = (contentWidth - boxGap * 3) / 4;
+  const boxHeight = 17;
+  const kpis = [
+    {
+      label: 'Total Responses',
+      value: String(totalResponses),
+      color: [15, 23, 42] as const,
+    },
+    {
+      label: 'Average Rating',
+      value: ratedSubs.length > 0 ? `${overallAvg.toFixed(2)} / 5` : '—',
+      color: [180, 83, 9] as const,
+    },
+    {
+      label: 'Positive Highlights',
+      value: String(positiveTicks),
+      color: [21, 128, 61] as const,
+    },
+    {
+      label: 'Comments / Suggestions',
+      value: `${commentCount} / ${improvementTicks}`,
+      color: [29, 78, 216] as const,
+    },
+  ];
+
+  kpis.forEach((kpi, idx) => {
+    const x = margin + idx * (boxWidth + boxGap);
+    doc.setDrawColor(226, 232, 240);
+    doc.setFillColor(248, 250, 252);
+    doc.roundedRect(x, cursorY, boxWidth, boxHeight, 2, 2, 'FD');
+
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(7.5);
+    doc.setTextColor(100, 116, 139);
+    doc.text(kpi.label, x + 3, cursorY + 5.5);
+
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(12);
+    doc.setTextColor(kpi.color[0], kpi.color[1], kpi.color[2]);
+    doc.text(kpi.value, x + 3, cursorY + 13);
+  });
+
+  cursorY += boxHeight + 6;
+
+  const drawFooter = () => {
+    const pageNum = doc.getNumberOfPages();
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(8);
+    doc.setTextColor(148, 163, 184);
+    doc.text(
+      `${orgName ? `${orgName} · ` : ''}PRESENZA · Feedback & Evaluation Report · Page ${pageNum}`,
+      pageWidth / 2,
+      pageHeight - 7,
+      { align: 'center' }
+    );
+  };
+
+  // Section 1: Rating Criteria Averages Table
+  const criteriaRows = Array.from(criterionAgg.values())
+    .map((c) => ({
+      label: c.label,
+      count: c.count,
+      avg: c.count > 0 ? (c.sum / c.count).toFixed(2) : '0.00',
+      distLabel: `5★:${c.dist[4]}  4★:${c.dist[3]}  3★:${c.dist[2]}  2★:${c.dist[1]}  1★:${c.dist[0]}`,
+    }))
+    .sort((a, b) => Number(b.avg) - Number(a.avg));
+
+  if (criteriaRows.length > 0) {
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(9.5);
+    doc.setTextColor(15, 23, 42);
+    doc.text('Rating Criteria Breakdown', margin, cursorY);
+    cursorY += 3;
+
+    autoTable(doc, {
+      startY: cursorY,
+      margin: { left: margin, right: margin, bottom: 16 },
+      head: [['Rating Question / Criterion', 'Votes', 'Avg Score', 'Star Distribution']],
+      body: criteriaRows.map((c) => [
+        c.label,
+        String(c.count),
+        `${c.avg} / 5.00`,
+        c.distLabel,
+      ]),
+      styles: {
+        fontSize: 8,
+        cellPadding: 2.2,
+        valign: 'middle',
+        textColor: [15, 23, 42],
+        lineColor: [226, 232, 240],
+        lineWidth: 0.2,
+      },
+      headStyles: {
+        fillColor: [30, 41, 59],
+        textColor: [255, 255, 255],
+        fontStyle: 'bold',
+        fontSize: 8,
+      },
+      alternateRowStyles: {
+        fillColor: [248, 250, 252],
+      },
+      columnStyles: {
+        0: { cellWidth: 'auto', fontStyle: 'bold' },
+        1: { cellWidth: 16, halign: 'center' },
+        2: { cellWidth: 24, halign: 'center', fontStyle: 'bold' },
+        3: { cellWidth: 58 },
+      },
+      didDrawPage: drawFooter,
+    });
+
+    const lastAutoTableY = (
+      doc as unknown as { lastAutoTable?: { finalY?: number } }
+    ).lastAutoTable?.finalY;
+    cursorY = (lastAutoTableY ?? cursorY + 20) + 6;
+  }
+
+  // Section 2: Top Selected Checklist Statements
+  const topPos = Array.from(positiveFreq.entries())
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 8);
+  const topImp = Array.from(improvementFreq.entries())
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 8);
+
+  if (topPos.length > 0 || topImp.length > 0) {
+    if (cursorY > pageHeight - 48) {
+      doc.addPage('a4', 'portrait');
+      cursorY = 16;
+    }
+
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(9.5);
+    doc.setTextColor(15, 23, 42);
+    doc.text('Top Selected Checklist Feedback', margin, cursorY);
+    cursorY += 3;
+
+    const checklistRows: Array<[string, string, string]> = [
+      ...topPos.map(([text, count]): [string, string, string] => [
+        'Positive Highlight',
+        text,
+        String(count),
+      ]),
+      ...topImp.map(([text, count]): [string, string, string] => [
+        'Improvement Suggestion',
+        text,
+        String(count),
+      ]),
+    ];
+
+    autoTable(doc, {
+      startY: cursorY,
+      margin: { left: margin, right: margin, bottom: 16 },
+      head: [['Category', 'Checklist Statement', 'Selected By']],
+      body: checklistRows,
+      styles: {
+        fontSize: 8,
+        cellPadding: 2.1,
+        valign: 'middle',
+        textColor: [15, 23, 42],
+        lineColor: [226, 232, 240],
+        lineWidth: 0.2,
+      },
+      headStyles: {
+        fillColor: [30, 41, 59],
+        textColor: [255, 255, 255],
+        fontStyle: 'bold',
+        fontSize: 8,
+      },
+      columnStyles: {
+        0: { cellWidth: 38, fontStyle: 'bold' },
+        1: { cellWidth: 'auto' },
+        2: { cellWidth: 24, halign: 'center', fontStyle: 'bold' },
+      },
+      didParseCell(data) {
+        if (data.section === 'body' && data.column.index === 0) {
+          const val = String(data.cell.raw || '');
+          data.cell.styles.textColor =
+            val === 'Positive Highlight' ? [21, 128, 61] : [180, 83, 9];
+        }
+      },
+      didDrawPage: drawFooter,
+    });
+
+    const lastAutoTableY = (
+      doc as unknown as { lastAutoTable?: { finalY?: number } }
+    ).lastAutoTable?.finalY;
+    cursorY = (lastAutoTableY ?? cursorY + 20) + 6;
+  }
+
+  // Section 3: Individual Participant Feedback & Evaluation Records
+  if (cursorY > pageHeight - 45) {
+    doc.addPage('a4', 'portrait');
+    cursorY = 16;
+  }
+
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(9.5);
+  doc.setTextColor(15, 23, 42);
+  doc.text(
+    `Participant Feedback Records (${submissions.length})`,
+    margin,
+    cursorY
+  );
+  cursorY += 3;
+
+  autoTable(doc, {
+    startY: cursorY,
+    margin: { left: margin, right: margin, bottom: 16 },
+    head: [
+      [
+        '#',
+        'Participant',
+        'Session & Date',
+        'Avg & Scores',
+        'Checklist Feedback',
+        'Written Comments, Custom Q&A & File',
+      ],
+    ],
+    body: submissions.map((sub, idx) => {
+      const submittedTime = sub.serverTimestamp?.toDate
+        ? sub.serverTimestamp.toDate().toLocaleString('en-US', {
+            month: 'short',
+            day: 'numeric',
+            hour: '2-digit',
+            minute: '2-digit',
+            hour12: true,
+          })
+        : '';
+
+      const participantInfo = [
+        sub.participantName || 'Anonymous Participant',
+        sub.participantDepartment || '',
+        sub.participantEmail || '',
+      ]
+        .filter(Boolean)
+        .join('\n');
+
+      const sessionInfo = [
+        sub.eventTitle,
+        [sub.eventDate, submittedTime].filter(Boolean).join(' · '),
+        sub.facilitatorName ? `Facilitator: ${sub.facilitatorName}` : '',
+        sub.sessionTopic ? `Topic: ${sub.sessionTopic}` : '',
+      ]
+        .filter(Boolean)
+        .join('\n');
+
+      const ratingBreakdown = sub.ratings
+        .map((r) => `• ${r.label}: ${r.score}/5`)
+        .join('\n');
+      const ratingCell = [
+        sub.averageRating > 0
+          ? `${sub.averageRating.toFixed(2)} / 5.00`
+          : 'Not rated',
+        ratingBreakdown,
+      ]
+        .filter(Boolean)
+        .join('\n');
+
+      const positiveList = sub.selectedStatements
+        .filter((s) => s.sentiment === 'positive')
+        .map((s) => `+ ${s.text}`);
+      const improveList = sub.selectedStatements
+        .filter((s) => s.sentiment === 'improvement')
+        .map((s) => `! ${s.text}`);
+      const checklistCell =
+        [...positiveList, ...improveList].join('\n') || '—';
+
+      const commentParts: string[] = [];
+      if (sub.writtenComment && sub.writtenComment.trim()) {
+        commentParts.push(`"${sub.writtenComment.trim()}"`);
+      }
+      if (sub.customAnswers && sub.customAnswers.length > 0) {
+        sub.customAnswers.forEach((a) => {
+          if (a.answer && a.answer.trim()) {
+            commentParts.push(`${a.prompt}: ${a.answer.trim()}`);
+          }
+        });
+      }
+      if (sub.attachment) {
+        commentParts.push(
+          `Attachment: ${sub.attachment.fileName} (${sub.attachment.mimeType})`
+        );
+      }
+
+      return [
+        String(idx + 1),
+        participantInfo,
+        sessionInfo,
+        ratingCell,
+        checklistCell,
+        commentParts.join('\n') || '—',
+      ];
+    }),
+    styles: {
+      fontSize: 7.5,
+      cellPadding: 2.2,
+      valign: 'top',
+      textColor: [15, 23, 42],
+      lineColor: [226, 232, 240],
+      lineWidth: 0.2,
+      overflow: 'linebreak',
+    },
+    headStyles: {
+      fillColor: [15, 23, 42],
+      textColor: [255, 255, 255],
+      fontStyle: 'bold',
+      fontSize: 7.5,
+    },
+    alternateRowStyles: {
+      fillColor: [248, 250, 252],
+    },
+    columnStyles: {
+      0: { cellWidth: 7, halign: 'center', fontStyle: 'bold' },
+      1: { cellWidth: 28, fontStyle: 'bold' },
+      2: { cellWidth: 32 },
+      3: { cellWidth: 33 },
+      4: { cellWidth: 38 },
+      5: { cellWidth: 'auto' },
+    },
+    didDrawPage: drawFooter,
+  });
+
+  if (submissions.length === 0) {
+    drawFooter();
+  }
+
+  doc.save(
+    `presenza-feedback-${slugify(filenamePrefix)}-${new Date()
+      .toISOString()
+      .slice(0, 10)}.pdf`
+  );
+}
+
