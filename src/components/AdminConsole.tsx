@@ -2089,15 +2089,6 @@ export default function AdminConsole({
 
         <button
           type="button"
-          onClick={() => setCurrentSection('certificates')}
-          className="min-h-[42px] px-4 py-2 rounded-xl text-xs sm:text-sm font-semibold transition-colors inline-flex items-center gap-2 text-slate-600 hover:bg-slate-100 hover:text-slate-900"
-        >
-          <Award className="w-4 h-4" />
-          <span>Certificates &amp; Recognition ({issuedCertificates.length})</span>
-        </button>
-
-        <button
-          type="button"
           onClick={() => setCurrentSection('voice')}
           className={`min-h-[42px] px-4 py-2 rounded-xl text-xs sm:text-sm font-semibold transition-colors inline-flex items-center gap-2 ${
             currentSection === 'voice'
