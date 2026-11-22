@@ -367,7 +367,7 @@ export default function AdminVoiceSettingsModule({
         )}
 
         {/* Delivery Targets & Speech Engine */}
-        <div className="mt-5 pt-5 border-t border-slate-100 grid grid-cols-1 md:grid-cols-3 gap-4">
+        <div className="mt-5 pt-5 border-t border-slate-100 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
           <label className="flex items-start gap-3 rounded-xl border border-slate-200 bg-slate-50/70 p-3.5 cursor-pointer hover:bg-slate-50">
             <input
               type="checkbox"
@@ -407,7 +407,31 @@ export default function AdminVoiceSettingsModule({
                 Announce on Participant Check-In Device
               </div>
               <p className="text-[11px] text-slate-600 mt-0.5">
-                Plays the welcome announcement on the kiosk or participant screen upon submission.
+                Plays the welcome announcement automatically on the participant screen upon submission.
+              </p>
+            </div>
+          </label>
+
+          <label className="flex items-start gap-3 rounded-xl border border-slate-200 bg-slate-50/70 p-3.5 cursor-pointer hover:bg-slate-50">
+            <input
+              type="checkbox"
+              checked={draft.showReplayWelcomeOnCheckIn}
+              onChange={(e) =>
+                setDraft((prev) => ({
+                  ...prev,
+                  showReplayWelcomeOnCheckIn: e.target.checked,
+                }))
+              }
+              className="mt-0.5 h-4 w-4 rounded border-slate-300 text-blue-700 focus:ring-blue-600"
+            />
+            <div>
+              <div className="text-xs font-bold text-slate-900">
+                Show &ldquo;Replay Welcome Voice&rdquo; on Check-In Page
+              </div>
+              <p className="text-[11px] text-slate-600 mt-0.5">
+                {draft.enabled
+                  ? 'Displays or hides the Replay Welcome Voice button on the participant check-in receipt.'
+                  : 'Turn Master Voice Announcements ON above to enable replay on check-in.'}
               </p>
             </div>
           </label>

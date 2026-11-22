@@ -1004,7 +1004,7 @@ export default function ParticipantCheckIn({
               No account or email required. You may close this page now.
             </span>
             <div className="w-full sm:w-auto flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
-              {voiceSettings.enabled && (
+              {voiceSettings.enabled && voiceSettings.showReplayWelcomeOnCheckIn && (
                 <button
                   type="button"
                   onClick={() => {

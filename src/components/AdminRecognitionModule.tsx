@@ -4,9 +4,12 @@ import {
   Check,
   CheckCircle2,
   CheckSquare,
+  ChevronDown,
+  ChevronUp,
   Download,
   Edit3,
   Eye,
+  EyeOff,
   FileCheck2,
   ImagePlus,
   Loader2,
@@ -432,7 +435,10 @@ export default function AdminRecognitionModule({
   const [issueError, setIssueError] = useState<string | null>(null);
   const [issueSuccess, setIssueSuccess] = useState<string | null>(null);
 
-  // Event Certificate Recognition Recap filter/selection & modal preview
+  // Event Certificate Recognition Recap filter/selection, minimize/hide & modal preview
+  const [recapDisplayMode, setRecapDisplayMode] = useState<
+    'expanded' | 'minimized' | 'hidden'
+  >('expanded');
   const [recapSearch, setRecapSearch] = useState('');
   const [recapCategoryFilter, setRecapCategoryFilter] = useState<string>('all');
   const [selectedCertIds, setSelectedCertIds] = useState<Set<string>>(
@@ -441,6 +447,15 @@ export default function AdminRecognitionModule({
   const [deletingCertId, setDeletingCertId] = useState<string | null>(null);
   const [previewCert, setPreviewCert] =
     useState<IssuedCertificateRecord | null>(null);
+
+  const handleJumpToEventRecap = () => {
+    setRecapDisplayMode('expanded');
+    window.setTimeout(() => {
+      document
+        .getElementById('event-certificate-recap')
+        ?.scrollIntoView({ behavior: 'smooth' });
+    }, 40);
+  };
 
   // Categories CRUD state (inside Certificate Studio)
   const [seedingCategories, setSeedingCategories] = useState(false);
@@ -1722,6 +1737,16 @@ export default function AdminRecognitionModule({
                 <div className="flex flex-wrap items-center gap-2.5 shrink-0">
                   <button
                     type="button"
+                    onClick={handleJumpToEventRecap}
+                    className="min-h-[40px] px-3.5 py-2 rounded-xl border border-slate-300 bg-white hover:bg-slate-100 text-slate-800 text-xs font-semibold inline-flex items-center gap-1.5 whitespace-nowrap shrink-0"
+                  >
+                    <Award className="w-4 h-4 text-blue-700" />
+                    <span>
+                      Jump to Event Recap ({eventCertificates.length})
+                    </span>
+                  </button>
+                  <button
+                    type="button"
                     disabled={issuing || eligibleChosenCount === 0}
                     onClick={() => void handleIssueSelectedCertificates()}
                     className="min-h-[40px] px-4 py-2 rounded-xl bg-amber-600 hover:bg-amber-700 text-white text-xs font-semibold inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 disabled:opacity-50"
@@ -2034,17 +2059,23 @@ export default function AdminRecognitionModule({
               {issueSuccess && (
                 <div className="mx-6 mt-4 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-xs text-emerald-800 font-semibold flex flex-wrap items-center justify-between gap-2">
                   <span>{issueSuccess}</span>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      document
-                        .getElementById('event-certificate-recap')
-                        ?.scrollIntoView({ behavior: 'smooth' });
-                    }}
-                    className="underline font-bold hover:text-emerald-950 shrink-0"
-                  >
-                    Jump to Event Recap
-                  </button>
+                  <div className="flex items-center gap-3 shrink-0">
+                    <button
+                      type="button"
+                      onClick={handleJumpToEventRecap}
+                      className="underline font-bold hover:text-emerald-950 whitespace-nowrap"
+                    >
+                      Jump to Event Recap
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setIssueSuccess(null)}
+                      aria-label="Dismiss notification"
+                      className="text-emerald-700 hover:text-emerald-950 p-0.5 rounded"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
                 </div>
               )}
 
@@ -2240,12 +2271,45 @@ export default function AdminRecognitionModule({
           )}
 
           {/* C. CERTIFICATE RECOGNITION RECAP FOR THIS CHOSEN EVENT */}
-          {selectedEvent && (
+          {selectedEvent && recapDisplayMode === 'hidden' && (
+            <div
+              id="event-certificate-recap"
+              className="bg-white border border-slate-200 rounded-2xl px-5 py-3.5 flex flex-wrap items-center justify-between gap-3"
+            >
+              <div className="text-xs text-slate-600 flex flex-wrap items-center gap-2 min-w-0">
+                <span className="font-bold text-slate-900 truncate">
+                  Certificate Recognition Recap Hidden
+                </span>
+                <span aria-hidden="true">·</span>
+                <span className="truncate">{selectedEvent.title}</span>
+                <span aria-hidden="true">·</span>
+                <span className="font-mono-tabular">
+                  {eventCertificates.length} issued
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setRecapDisplayMode('expanded')}
+                className="min-h-[36px] px-3.5 py-1.5 rounded-xl border border-slate-300 bg-slate-50 hover:bg-slate-100 text-xs font-semibold text-slate-800 inline-flex items-center gap-1.5 whitespace-nowrap shrink-0"
+              >
+                <Eye className="w-3.5 h-3.5 text-blue-700" />
+                <span>Show Event Recap</span>
+              </button>
+            </div>
+          )}
+
+          {selectedEvent && recapDisplayMode !== 'hidden' && (
             <section
               id="event-certificate-recap"
               className="bg-white border border-slate-200 rounded-2xl overflow-hidden"
             >
-              <div className="p-5 sm:p-6 border-b border-slate-200 flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+              <div
+                className={`p-5 sm:p-6 flex flex-col lg:flex-row lg:items-center justify-between gap-4 ${
+                  recapDisplayMode === 'expanded'
+                    ? 'border-b border-slate-200'
+                    : ''
+                }`}
+              >
                 <div>
                   <h3 className="text-base sm:text-lg font-bold text-slate-900">
                     Certificate Recognition Recap — {selectedEvent.title}
@@ -2312,9 +2376,42 @@ export default function AdminRecognitionModule({
                     <Printer className="w-3.5 h-3.5" />
                     <span>Print</span>
                   </button>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setRecapDisplayMode((prev) =>
+                        prev === 'minimized' ? 'expanded' : 'minimized'
+                      )
+                    }
+                    aria-expanded={recapDisplayMode === 'expanded'}
+                    className="min-h-[40px] px-3 py-2 rounded-xl border border-slate-300 bg-white hover:bg-slate-100 text-slate-800 text-xs font-semibold inline-flex items-center gap-1.5 whitespace-nowrap shrink-0"
+                  >
+                    {recapDisplayMode === 'minimized' ? (
+                      <>
+                        <ChevronDown className="w-3.5 h-3.5 text-blue-700" />
+                        <span>Expand Recap</span>
+                      </>
+                    ) : (
+                      <>
+                        <ChevronUp className="w-3.5 h-3.5" />
+                        <span>Minimize</span>
+                      </>
+                    )}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setRecapDisplayMode('hidden')}
+                    className="min-h-[40px] px-3 py-2 rounded-xl border border-slate-300 bg-white hover:bg-slate-100 text-slate-700 text-xs font-semibold inline-flex items-center gap-1.5 whitespace-nowrap shrink-0"
+                    title="Hide Event Certificate Recap"
+                  >
+                    <EyeOff className="w-3.5 h-3.5" />
+                    <span>Hide</span>
+                  </button>
                 </div>
               </div>
 
+              {recapDisplayMode === 'expanded' && (
+                <>
               {/* Event Category Breakdown & Search Filter */}
               <div className="px-5 py-3.5 bg-slate-50 border-b border-slate-200 space-y-3">
                 {eventRecapCategoryBreakdown.length > 0 && (
@@ -2521,6 +2618,8 @@ export default function AdminRecognitionModule({
                     </tbody>
                   </table>
                 </div>
+              )}
+                </>
               )}
             </section>
           )}

@@ -364,6 +364,7 @@ export interface VoiceAnnouncementSettings {
   indonesianTemplate: string;
   announceOnDashboard: boolean;
   announceOnCheckIn: boolean;
+  showReplayWelcomeOnCheckIn: boolean;
 }
 
 // Module 4: Live Animated Attendance Dashboard

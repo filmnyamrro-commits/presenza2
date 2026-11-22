@@ -814,6 +814,7 @@
         "indonesianTemplate": { "type": "string", "minLength": 2, "maxLength": 300 },
         "announceOnDashboard": { "type": "boolean" },
         "announceOnCheckIn": { "type": "boolean" },
+        "showReplayWelcomeOnCheckIn": { "type": "boolean" },
         "updatedByUid": {
           "type": "string",
           "minLength": 1,

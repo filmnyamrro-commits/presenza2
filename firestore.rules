@@ -550,6 +550,7 @@ service cloud.firestore {
           'language', 'speakingRate', 'volume',
           'englishTemplate', 'indonesianTemplate',
           'announceOnDashboard', 'announceOnCheckIn',
+          'showReplayWelcomeOnCheckIn',
           'updatedByUid', 'updatedAt'
         ]) &&
         data.enabled is bool &&
@@ -566,6 +567,7 @@ service cloud.firestore {
         data.indonesianTemplate is string && data.indonesianTemplate.size() >= 2 && data.indonesianTemplate.size() <= 300 &&
         data.announceOnDashboard is bool &&
         data.announceOnCheckIn is bool &&
+        (!('showReplayWelcomeOnCheckIn' in data) || data.showReplayWelcomeOnCheckIn is bool) &&
         isValidId(data.updatedByUid) &&
         data.updatedAt is timestamp;
     }
@@ -917,6 +919,7 @@ service cloud.firestore {
           'language', 'speakingRate', 'volume',
           'englishTemplate', 'indonesianTemplate',
           'announceOnDashboard', 'announceOnCheckIn',
+          'showReplayWelcomeOnCheckIn',
           'updatedByUid', 'updatedAt'
         ]);
       allow delete: if isAdmin() && isValidId(settingId);

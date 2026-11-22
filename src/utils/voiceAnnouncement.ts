@@ -135,6 +135,7 @@ export const DEFAULT_VOICE_SETTINGS: VoiceAnnouncementSettings = {
   indonesianTemplate: DEFAULT_INDONESIAN_TEMPLATE,
   announceOnDashboard: true,
   announceOnCheckIn: true,
+  showReplayWelcomeOnCheckIn: true,
 };
 
 const VALID_VOICE_IDS = new Set<string>([
@@ -204,6 +205,10 @@ export function mergeVoiceSettings(
       typeof partial.announceOnCheckIn === 'boolean'
         ? partial.announceOnCheckIn
         : DEFAULT_VOICE_SETTINGS.announceOnCheckIn,
+    showReplayWelcomeOnCheckIn:
+      typeof partial.showReplayWelcomeOnCheckIn === 'boolean'
+        ? partial.showReplayWelcomeOnCheckIn
+        : DEFAULT_VOICE_SETTINGS.showReplayWelcomeOnCheckIn,
   };
 }
 
