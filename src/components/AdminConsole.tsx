@@ -908,6 +908,28 @@ export default function AdminConsole({
     }
   };
 
+  const handleSyncCertificateSettings = async (
+    nextSettings: CertificateSettings
+  ) => {
+    if (!user) return;
+    const normalized = mergeCertificateSettings(nextSettings);
+    try {
+      await setDoc(doc(db, 'certificateSettings', 'default'), {
+        ...normalized,
+        updatedByUid: user.uid,
+        updatedAt: serverTimestamp(),
+      });
+      setCertificateSettings(normalized);
+    } catch (error) {
+      handleFirestoreError(
+        error,
+        OperationType.WRITE,
+        'certificateSettings/default'
+      );
+      throw error;
+    }
+  };
+
   const handleSaveCertificateSettings = async (
     nextSettings: CertificateSettings
   ) => {
@@ -922,6 +944,27 @@ export default function AdminConsole({
         updatedAt: serverTimestamp(),
       });
       setCertificateSettings(normalized);
+
+      // Keep recognition template signatories & Term 1–4 synchronized
+      const syncedTemplate = mergeRecognitionTemplate({
+        ...recognitionTemplate,
+        bestTerm: normalized.bestTerm,
+        termBestCategories: normalized.termBestCategories,
+        picPdName: normalized.picPdName,
+        picPdTitle: normalized.picPdTitle,
+        picPdSignatureDataUrl: normalized.facilitatorSignatureDataUrl,
+        principalName: normalized.principalName,
+        principalTitle: normalized.principalTitle,
+        principalSignatureDataUrl: normalized.principalSignatureDataUrl,
+        signatoryLabel: normalized.picPdTitle || 'PIC of Professional Development',
+      });
+      await setDoc(doc(db, 'recognitionTemplates', 'default'), {
+        ...syncedTemplate,
+        signatureDataUrl: '',
+        updatedByUid: user.uid,
+        updatedAt: serverTimestamp(),
+      });
+
       setShowCertCustomizer(false);
     } catch (error) {
       setCertSettingsError(
@@ -1999,7 +2042,8 @@ export default function AdminConsole({
       </div>
       )}
 
-      {/* Admin Module Switcher Tabs */}
+      {/* Admin Module Switcher Tabs (omitted on Certificates & Recognition page) */}
+      {currentSection !== 'certificates' && (
       <nav
         className="flex flex-wrap items-center gap-2 bg-white/85 backdrop-blur-xs border border-slate-200 rounded-2xl p-1.5"
         aria-label="Administrator modules"
@@ -2046,11 +2090,7 @@ export default function AdminConsole({
         <button
           type="button"
           onClick={() => setCurrentSection('certificates')}
-          className={`min-h-[42px] px-4 py-2 rounded-xl text-xs sm:text-sm font-semibold transition-colors inline-flex items-center gap-2 ${
-            currentSection === 'certificates'
-              ? 'bg-amber-600 text-white'
-              : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
-          }`}
+          className="min-h-[42px] px-4 py-2 rounded-xl text-xs sm:text-sm font-semibold transition-colors inline-flex items-center gap-2 text-slate-600 hover:bg-slate-100 hover:text-slate-900"
         >
           <Award className="w-4 h-4" />
           <span>Certificates &amp; Recognition ({issuedCertificates.length})</span>
@@ -2069,6 +2109,7 @@ export default function AdminConsole({
           <span>Voice Announcement Settings</span>
         </button>
       </nav>
+      )}
 
       {(currentSection === 'live-board' || isProjectorOpen) && (
         <LiveAnimatedDashboard
@@ -2126,6 +2167,8 @@ export default function AdminConsole({
           categories={recognitionCategories}
           templateConfig={recognitionTemplate}
           certificates={issuedCertificates}
+          certificateSettings={certificateSettings}
+          onSyncCertificateSettings={handleSyncCertificateSettings}
         />
       )}
 

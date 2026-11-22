@@ -1,12 +1,13 @@
 import {
   Award,
+  CalendarDays,
   Check,
   CheckCircle2,
   CheckSquare,
   Download,
   Edit3,
+  Eye,
   FileCheck2,
-  History,
   ImagePlus,
   Loader2,
   Palette,
@@ -19,7 +20,6 @@ import {
   Sparkles,
   Square,
   Star,
-  Tag,
   Trash2,
   UserPlus,
   Users,
@@ -42,7 +42,9 @@ import {
 } from '../firebase';
 import {
   type AttendanceRecord,
+  type CertificateSettings,
   type CertificateTermKey,
+  type CertificateThemeId,
   type EventRecord,
   type FeedbackSubmissionRecord,
   type IssuedCertificateRecord,
@@ -66,13 +68,18 @@ import {
   resolveBestTermLabel,
 } from '../utils/feedbackAndRecognitionDefaults';
 import {
+  compressCertificateBackground,
   compressLogoFile,
   compressSignatureCanvas,
   compressSignatureFile,
 } from '../utils/imageCompress';
 import {
+  CERTIFICATE_THEME_LIST,
+  CERTIFICATE_THEMES,
   downloadRecognitionCertificatesPdf,
+  mergeCertificateSettings,
   printRecognitionCertificatesPdf,
+  type RecognitionPdfBatchOptions,
 } from '../utils/pdfExport';
 
 interface AdminRecognitionModuleProps {
@@ -84,45 +91,23 @@ interface AdminRecognitionModuleProps {
   categories: RecognitionCategory[];
   templateConfig: RecognitionTemplateConfig;
   certificates: IssuedCertificateRecord[];
+  certificateSettings: CertificateSettings;
+  onSyncCertificateSettings?: (next: CertificateSettings) => Promise<void>;
 }
 
-const COLOR_PRESETS: ReadonlyArray<{
+const STUDIO_COLOR_PRESETS: ReadonlyArray<{
+  themeId: CertificateThemeId;
   name: string;
   primaryColor: string;
   accentColor: string;
   paperColor: string;
-}> = [
-  {
-    name: 'Classic Navy & Gold',
-    primaryColor: '#0F172A',
-    accentColor: '#B45309',
-    paperColor: '#FFFFFF',
-  },
-  {
-    name: 'Emerald Academic',
-    primaryColor: '#065F46',
-    accentColor: '#B45309',
-    paperColor: '#FCFDFB',
-  },
-  {
-    name: 'Royal Indigo',
-    primaryColor: '#1E293B',
-    accentColor: '#4F46E5',
-    paperColor: '#FFFFFF',
-  },
-  {
-    name: 'Crimson Crest',
-    primaryColor: '#881337',
-    accentColor: '#CA8A04',
-    paperColor: '#FFFDF9',
-  },
-  {
-    name: 'Teal Modern',
-    primaryColor: '#0F766E',
-    accentColor: '#0284C7',
-    paperColor: '#FFFFFF',
-  },
-];
+}> = CERTIFICATE_THEME_LIST.map((theme) => ({
+  themeId: theme.id,
+  name: theme.name,
+  primaryColor: theme.outerBorderHex,
+  accentColor: theme.innerBorderHex,
+  paperColor: theme.paperHex,
+}));
 
 const PLACEHOLDER_TOKENS = [
   '{{participant}}',
@@ -135,6 +120,222 @@ const PLACEHOLDER_TOKENS = [
   '{{organizer}}',
 ];
 
+function inferThemeIdFromColors(
+  primaryColor: string,
+  accentColor: string,
+  fallback: CertificateThemeId = 'classic-navy'
+): CertificateThemeId {
+  const matched = STUDIO_COLOR_PRESETS.find(
+    (p) =>
+      p.primaryColor.toLowerCase() === primaryColor.toLowerCase() &&
+      p.accentColor.toLowerCase() === accentColor.toLowerCase()
+  );
+  return matched ? matched.themeId : fallback;
+}
+
+interface RecognitionCertificateCanvasProps {
+  template: RecognitionTemplateConfig;
+  backgroundDataUrl?: string;
+  backgroundOpacity?: number;
+  logoUrl?: string;
+  organizerName: string;
+  ribbonText: string;
+  recipientName: string;
+  recipientDepartment?: string;
+  wordingText: string;
+  topicText?: string;
+  themeText?: string;
+  certificateNumber: string;
+  issueDate: string;
+  eventTitle: string;
+}
+
+function RecognitionCertificateCanvas({
+  template,
+  backgroundDataUrl,
+  backgroundOpacity = 22,
+  logoUrl,
+  organizerName,
+  ribbonText,
+  recipientName,
+  recipientDepartment,
+  wordingText,
+  topicText,
+  themeText,
+  certificateNumber,
+  issueDate,
+  eventTitle,
+}: RecognitionCertificateCanvasProps) {
+  const metaParts: string[] = [];
+  if (template.showTopic && themeText?.trim()) {
+    metaParts.push(`Theme: ${themeText.trim()}`);
+  }
+  if (template.showTopic && topicText?.trim()) {
+    metaParts.push(`Topic: ${topicText.trim()}`);
+  }
+
+  return (
+    <div
+      className={`w-full shadow-lg rounded-sm relative overflow-hidden flex flex-col justify-between p-6 sm:p-8 text-center transition-all mx-auto ${
+        template.orientation === 'portrait'
+          ? 'max-w-[440px] aspect-[210/297]'
+          : 'max-w-[680px] aspect-[297/210]'
+      }`}
+      style={{
+        backgroundColor: template.paperColor,
+        border: `4px solid ${template.primaryColor}`,
+        fontFamily:
+          template.fontFamily === 'times'
+            ? 'Georgia, "Times New Roman", serif'
+            : template.fontFamily === 'courier'
+            ? 'ui-monospace, monospace'
+            : 'system-ui, sans-serif',
+      }}
+    >
+      {/* Background Photo with Controlled Opacity */}
+      {backgroundDataUrl && backgroundOpacity > 0 && (
+        <div className="absolute inset-2 overflow-hidden pointer-events-none">
+          <img
+            src={backgroundDataUrl}
+            alt=""
+            aria-hidden="true"
+            className="w-full h-full object-cover"
+            style={{ opacity: Math.min(1, Math.max(0, backgroundOpacity / 100)) }}
+          />
+        </div>
+      )}
+
+      {/* Inner accent border */}
+      <div
+        className="absolute inset-2 pointer-events-none"
+        style={{ border: `1.5px solid ${template.accentColor}` }}
+      />
+
+      <div className="relative z-10 flex flex-col items-center space-y-2 pt-1.5">
+        {logoUrl && (
+          <img
+            src={logoUrl}
+            alt="Organization logo"
+            className="h-10 w-10 object-contain"
+          />
+        )}
+        <div
+          className="text-[10px] font-bold tracking-widest uppercase"
+          style={{ color: template.accentColor }}
+        >
+          {organizerName}
+        </div>
+        <h4
+          className="text-xl sm:text-2xl font-bold tracking-tight leading-tight"
+          style={{ color: template.primaryColor }}
+        >
+          {template.title}
+        </h4>
+        {template.subtitle && (
+          <p className="text-[10px] uppercase tracking-wider text-slate-500">
+            {template.subtitle}
+          </p>
+        )}
+
+        <div
+          className="mt-1 px-4 py-1 rounded text-[11px] font-bold uppercase tracking-wider bg-slate-50/90 border"
+          style={{
+            color: template.accentColor,
+            borderColor: template.accentColor,
+          }}
+        >
+          {ribbonText}
+        </div>
+      </div>
+
+      <div className="relative z-10 my-auto py-3 space-y-2">
+        <p className="text-[11px] text-slate-500">
+          This recognition award is proudly presented to
+        </p>
+        <div
+          className="text-2xl sm:text-3xl font-bold"
+          style={{ color: template.primaryColor }}
+        >
+          {recipientName}
+        </div>
+        {recipientDepartment?.trim() && (
+          <div
+            className="text-xs font-bold"
+            style={{ color: template.accentColor }}
+          >
+            {recipientDepartment}
+          </div>
+        )}
+        <div className="w-40 h-px bg-slate-300 mx-auto" />
+        <p className="text-xs text-slate-700 leading-relaxed max-w-lg mx-auto">
+          {wordingText}
+        </p>
+        {metaParts.length > 0 && (
+          <div
+            className="text-[11px] font-bold pt-1"
+            style={{ color: template.primaryColor }}
+          >
+            {metaParts.join(' · ')}
+          </div>
+        )}
+      </div>
+
+      <div className="relative z-10 space-y-2.5 pb-1">
+        <div className="grid grid-cols-2 gap-8 sm:gap-12 items-end text-[10px] max-w-lg mx-auto">
+          <div className="flex flex-col items-center">
+            {template.picPdSignatureDataUrl && (
+              <img
+                src={template.picPdSignatureDataUrl}
+                alt="PIC of Professional Development signature"
+                className="h-8 object-contain mb-1"
+              />
+            )}
+            {template.picPdName.trim() && (
+              <div
+                className="font-bold pb-0.5 truncate max-w-full"
+                style={{ color: template.primaryColor }}
+              >
+                {template.picPdName.trim()}
+              </div>
+            )}
+            <div className="w-full border-t border-slate-300 pt-1 text-slate-600 font-medium truncate">
+              {template.picPdTitle.trim() || 'PIC of Professional Development'}
+            </div>
+          </div>
+
+          <div className="flex flex-col items-center">
+            {template.principalSignatureDataUrl && (
+              <img
+                src={template.principalSignatureDataUrl}
+                alt="Principal signature"
+                className="h-8 object-contain mb-1"
+              />
+            )}
+            {template.principalName.trim() && (
+              <div
+                className="font-bold pb-0.5 truncate max-w-full"
+                style={{ color: template.primaryColor }}
+              >
+                {template.principalName.trim()}
+              </div>
+            )}
+            <div className="w-full border-t border-slate-300 pt-1 text-slate-600 font-medium truncate">
+              {template.principalTitle.trim() || 'Principal'}
+            </div>
+          </div>
+        </div>
+
+        {template.showCertificateId && (
+          <div className="font-mono-tabular text-[9px] text-slate-500">
+            Certificate ID: {certificateNumber} · Issued: {issueDate} · Event:{' '}
+            {eventTitle}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export default function AdminRecognitionModule({
   user,
   events,
@@ -144,12 +345,20 @@ export default function AdminRecognitionModule({
   categories,
   templateConfig,
   certificates,
+  certificateSettings,
+  onSyncCertificateSettings,
 }: AdminRecognitionModuleProps) {
-  const [subTab, setSubTab] = useState<
-    'issue' | 'designer' | 'categories' | 'history'
-  >('issue');
+  // ONLY 2 top sub-menus:
+  // 1. choose-event (Event picker + Award & Issue + Certificate Recognition Recap per event)
+  // 2. studio (Certificate Studio: themes, background, Term 1–4, all categories, wording, signatories)
+  const [subTab, setSubTab] = useState<'choose-event' | 'studio'>(
+    'choose-event'
+  );
+  const [studioSection, setStudioSection] = useState<
+    'theme' | 'categories' | 'signatories'
+  >('theme');
 
-  // Event & Category selection for awarding
+  // Event & Category selection for awarding & recap
   const [selectedEventId, setSelectedEventId] = useState<string>(
     () => events[0]?.id || ''
   );
@@ -164,7 +373,7 @@ export default function AdminRecognitionModule({
     () => new Set()
   );
 
-  // Manual nominee addition (when recipient isn't in attendance log)
+  // Manual nominee addition
   const [customNomineeName, setCustomNomineeName] = useState('');
   const [customNomineeDept, setCustomNomineeDept] = useState('');
   const [customNomineeEmail, setCustomNomineeEmail] = useState('');
@@ -174,7 +383,17 @@ export default function AdminRecognitionModule({
   const [issueError, setIssueError] = useState<string | null>(null);
   const [issueSuccess, setIssueSuccess] = useState<string | null>(null);
 
-  // Categories CRUD state
+  // Event Certificate Recognition Recap filter/selection & modal preview
+  const [recapSearch, setRecapSearch] = useState('');
+  const [recapCategoryFilter, setRecapCategoryFilter] = useState<string>('all');
+  const [selectedCertIds, setSelectedCertIds] = useState<Set<string>>(
+    () => new Set()
+  );
+  const [deletingCertId, setDeletingCertId] = useState<string | null>(null);
+  const [previewCert, setPreviewCert] =
+    useState<IssuedCertificateRecord | null>(null);
+
+  // Categories CRUD state (inside Certificate Studio)
   const [seedingCategories, setSeedingCategories] = useState(false);
   const autoSeededRef = useRef(false);
   const [newCatName, setNewCatName] = useState('');
@@ -184,15 +403,32 @@ export default function AdminRecognitionModule({
   const [editCatDesc, setEditCatDesc] = useState('');
   const [savingCat, setSavingCat] = useState(false);
   const [catError, setCatError] = useState<string | null>(null);
+  const [catSavedNote, setCatSavedNote] = useState<string | null>(null);
 
-  // Certificate Designer state
+  // Certificate Studio Draft state (Template + Theme/Background sync)
   const [draftTemplate, setDraftTemplate] = useState<RecognitionTemplateConfig>(
     () => mergeRecognitionTemplate(templateConfig)
+  );
+  const [draftThemeId, setDraftThemeId] = useState<CertificateThemeId>(
+    () =>
+      certificateSettings?.themeId ||
+      inferThemeIdFromColors(
+        templateConfig.primaryColor,
+        templateConfig.accentColor
+      )
+  );
+  const [draftBgDataUrl, setDraftBgDataUrl] = useState<string>(
+    () => certificateSettings?.backgroundDataUrl || ''
+  );
+  const [draftBgOpacity, setDraftBgOpacity] = useState<number>(
+    () => certificateSettings?.backgroundOpacity ?? 22
   );
   const [savingTemplate, setSavingTemplate] = useState(false);
   const [templateSaved, setTemplateSaved] = useState(false);
   const [templateError, setTemplateError] = useState<string | null>(null);
+
   const logoUploadRef = useRef<HTMLInputElement | null>(null);
+  const bgUploadRef = useRef<HTMLInputElement | null>(null);
   const picPdSigUploadRef = useRef<HTMLInputElement | null>(null);
   const principalSigUploadRef = useRef<HTMLInputElement | null>(null);
 
@@ -203,20 +439,16 @@ export default function AdminRecognitionModule({
   const drawCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const isDrawingRef = useRef(false);
 
-  // Certificate History state
-  const [historySearch, setHistorySearch] = useState('');
-  const [historyEventFilter, setHistoryEventFilter] = useState<string>('all');
-  const [historyCategoryFilter, setHistoryCategoryFilter] =
-    useState<string>('all');
-  const [selectedCertIds, setSelectedCertIds] = useState<Set<string>>(
-    () => new Set()
-  );
-  const [deletingCertId, setDeletingCertId] = useState<string | null>(null);
-
-  // Sync template draft when remote updates
+  // Sync studio draft when remote updates
   useEffect(() => {
     setDraftTemplate(mergeRecognitionTemplate(templateConfig));
   }, [templateConfig]);
+
+  useEffect(() => {
+    setDraftThemeId(certificateSettings.themeId);
+    setDraftBgDataUrl(certificateSettings.backgroundDataUrl || '');
+    setDraftBgOpacity(certificateSettings.backgroundOpacity ?? 22);
+  }, [certificateSettings]);
 
   // Keep selectedEventId & selectedCategoryId valid
   useEffect(() => {
@@ -234,7 +466,26 @@ export default function AdminRecognitionModule({
     }
   }, [categories, selectedCategoryId]);
 
-  // Seed default 10 recognition categories once automatically if empty
+  const categoriesById = useMemo(
+    () => new Map(categories.map((c) => [c.id, c])),
+    [categories]
+  );
+
+  const eventsById = useMemo(
+    () => new Map(events.map((e) => [e.id, e])),
+    [events]
+  );
+
+  const pdfBatchOptions: RecognitionPdfBatchOptions = useMemo(
+    () => ({
+      certificateSettings,
+      categoriesById,
+      eventsById,
+    }),
+    [certificateSettings, categoriesById, eventsById]
+  );
+
+  // Seed default 14 recognition categories once automatically if empty
   const seedDefaultCategories = async () => {
     if (seedingCategories) return;
     setSeedingCategories(true);
@@ -254,6 +505,8 @@ export default function AdminRecognitionModule({
         }
       }
       await batch.commit();
+      setCatSavedNote('Default & Term 1–4 recognition categories restored.');
+      window.setTimeout(() => setCatSavedNote(null), 2600);
     } catch (error) {
       setCatError('Unable to restore default recognition categories.');
       handleFirestoreError(
@@ -350,6 +603,68 @@ export default function AdminRecognitionModule({
     certificates,
   ]);
 
+  // Certificates scoped to the currently chosen event — dynamically aligned with live categories & studio settings
+  const eventCertificates = useMemo(() => {
+    if (!selectedEvent) return [];
+    return certificates.filter((c) => c.eventId === selectedEvent.id);
+  }, [certificates, selectedEvent]);
+
+  const activeStudioTermLabel = useMemo(
+    () =>
+      resolveBestTermLabel(
+        templateConfig.bestTerm,
+        templateConfig.termBestCategories
+      ),
+    [templateConfig.bestTerm, templateConfig.termBestCategories]
+  );
+
+  // Per-category counts inside the selected event's Certificate Recognition Recap
+  const eventRecapCategoryBreakdown = useMemo(() => {
+    const counts = new Map<string, { categoryId: string; name: string; count: number }>();
+    for (const cert of eventCertificates) {
+      const liveCatName =
+        categoriesById.get(cert.categoryId)?.name?.trim() || cert.categoryName;
+      const existing = counts.get(cert.categoryId);
+      if (existing) {
+        existing.count += 1;
+      } else {
+        counts.set(cert.categoryId, {
+          categoryId: cert.categoryId,
+          name: liveCatName,
+          count: 1,
+        });
+      }
+    }
+    return Array.from(counts.values()).sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
+  }, [eventCertificates, categoriesById]);
+
+  const filteredEventRecapCertificates = useMemo(() => {
+    const q = recapSearch.trim().toLowerCase();
+    return eventCertificates.filter((cert) => {
+      if (
+        recapCategoryFilter !== 'all' &&
+        cert.categoryId !== recapCategoryFilter
+      ) {
+        return false;
+      }
+      if (q) {
+        const liveCatName =
+          categoriesById.get(cert.categoryId)?.name?.trim() || cert.categoryName;
+        const hay =
+          `${cert.participantName} ${cert.participantDepartment} ${liveCatName} ${cert.certificateNumber}`.toLowerCase();
+        if (!hay.includes(q)) return false;
+      }
+      return true;
+    });
+  }, [eventCertificates, recapCategoryFilter, recapSearch, categoriesById]);
+
+  const selectedRecapBulkCerts = useMemo(() => {
+    if (selectedCertIds.size === 0) return filteredEventRecapCertificates;
+    return filteredEventRecapCertificates.filter((c) =>
+      selectedCertIds.has(c.id)
+    );
+  }, [filteredEventRecapCertificates, selectedCertIds]);
+
   const toggleAttendanceSelection = (id: string) => {
     setSelectedAttendanceIds((prev) => {
       const next = new Set(prev);
@@ -440,7 +755,7 @@ export default function AdminRecognitionModule({
               venue: selectedEvent.venue,
               topic: eventTopicVal,
               theme: eventThemeVal,
-              facilitator: facilitatorsVal,
+              facilitator: picPdNameVal || facilitatorsVal,
               organizer: organizerName,
               department: rec.classDepartment,
             }
@@ -556,21 +871,6 @@ export default function AdminRecognitionModule({
     );
     const certDocId = buildCertificateDocId(dedupeKey);
     const certNumber = generateCertificateNumber();
-    const wording = interpolateRecognitionWording(
-      templateConfig.wordingTemplate,
-      {
-        participant: name,
-        category: selectedCategory.name,
-        event: selectedEvent.title,
-        date: eventDateVal,
-        venue: selectedEvent.venue,
-        topic: eventTopicVal,
-        theme: eventThemeVal,
-        facilitator: facilitatorsVal,
-        organizer: organizerName,
-        department: dept,
-      }
-    ).slice(0, 700);
 
     const activeTermCategory = resolveBestTermLabel(
       templateConfig.bestTerm,
@@ -584,6 +884,22 @@ export default function AdminRecognitionModule({
     const principalTitleVal = (
       templateConfig.principalTitle.trim() || 'Principal'
     ).slice(0, 120);
+
+    const wording = interpolateRecognitionWording(
+      templateConfig.wordingTemplate,
+      {
+        participant: name,
+        category: selectedCategory.name,
+        event: selectedEvent.title,
+        date: eventDateVal,
+        venue: selectedEvent.venue,
+        topic: eventTopicVal,
+        theme: eventThemeVal,
+        facilitator: picPdNameVal || facilitatorsVal,
+        organizer: organizerName,
+        department: dept,
+      }
+    ).slice(0, 700);
 
     try {
       await setDoc(doc(db, 'certificates', certDocId), {
@@ -643,10 +959,11 @@ export default function AdminRecognitionModule({
     }
   };
 
-  // Recognition Categories CRUD
+  // Recognition Categories CRUD (in Certificate Studio)
   const handleAddCategory = async (e: React.FormEvent) => {
     e.preventDefault();
     setCatError(null);
+    setCatSavedNote(null);
     const name = newCatName.trim().slice(0, 100);
     const desc = newCatDesc.trim().slice(0, 300);
     if (name.length < 2) {
@@ -667,6 +984,8 @@ export default function AdminRecognitionModule({
       });
       setNewCatName('');
       setNewCatDesc('');
+      setCatSavedNote(`Added "${name}" — synced to all events.`);
+      window.setTimeout(() => setCatSavedNote(null), 2600);
     } catch (error) {
       setCatError('Unable to add recognition category.');
       handleFirestoreError(
@@ -681,6 +1000,8 @@ export default function AdminRecognitionModule({
 
   const handleSaveEditCategory = async () => {
     if (!editingCat) return;
+    setCatError(null);
+    setCatSavedNote(null);
     const name = editCatName.trim().slice(0, 100);
     const desc = editCatDesc.trim().slice(0, 300);
     if (name.length < 2) {
@@ -696,6 +1017,8 @@ export default function AdminRecognitionModule({
         updatedAt: serverTimestamp(),
       });
       setEditingCat(null);
+      setCatSavedNote(`Updated "${name}" — aligned across all event recaps.`);
+      window.setTimeout(() => setCatSavedNote(null), 2600);
     } catch (error) {
       setCatError('Unable to update category.');
       handleFirestoreError(
@@ -710,8 +1033,11 @@ export default function AdminRecognitionModule({
 
   const handleDeleteCategory = async (id: string) => {
     setCatError(null);
+    setCatSavedNote(null);
     try {
       await deleteDoc(doc(db, 'recognitionCategories', id));
+      setCatSavedNote('Category removed.');
+      window.setTimeout(() => setCatSavedNote(null), 2200);
     } catch (error) {
       setCatError('Unable to delete category.');
       handleFirestoreError(
@@ -722,7 +1048,7 @@ export default function AdminRecognitionModule({
     }
   };
 
-  // Certificate Designer Save & File Uploads
+  // Certificate Studio Save & Sync across recognitionTemplates/default AND certificateSettings/default
   const handleSaveTemplate = async () => {
     setTemplateError(null);
     setTemplateSaved(false);
@@ -745,10 +1071,29 @@ export default function AdminRecognitionModule({
         updatedByUid: user.uid,
         updatedAt: serverTimestamp(),
       });
+
+      if (onSyncCertificateSettings) {
+        const syncedCertSettings = mergeCertificateSettings({
+          ...certificateSettings,
+          themeId: draftThemeId,
+          backgroundDataUrl: draftBgDataUrl,
+          backgroundOpacity: draftBgOpacity,
+          bestTerm: clean.bestTerm,
+          termBestCategories: clean.termBestCategories,
+          picPdName: clean.picPdName,
+          picPdTitle: clean.picPdTitle,
+          principalName: clean.principalName,
+          principalTitle: clean.principalTitle,
+          facilitatorSignatureDataUrl: clean.picPdSignatureDataUrl,
+          principalSignatureDataUrl: clean.principalSignatureDataUrl,
+        });
+        await onSyncCertificateSettings(syncedCertSettings);
+      }
+
       setTemplateSaved(true);
-      window.setTimeout(() => setTemplateSaved(false), 2500);
+      window.setTimeout(() => setTemplateSaved(false), 3000);
     } catch (error) {
-      setTemplateError('Unable to save recognition template settings.');
+      setTemplateError('Unable to save Certificate Studio settings.');
       handleFirestoreError(
         error,
         OperationType.WRITE,
@@ -767,6 +1112,18 @@ export default function AdminRecognitionModule({
     } catch (err) {
       setTemplateError(
         err instanceof Error ? err.message : 'Failed to process logo file.'
+      );
+    }
+  };
+
+  const handleUploadBgPhoto = async (file: File) => {
+    setTemplateError(null);
+    try {
+      const dataUrl = await compressCertificateBackground(file);
+      setDraftBgDataUrl(dataUrl);
+    } catch (err) {
+      setTemplateError(
+        err instanceof Error ? err.message : 'Failed to process background photo.'
       );
     }
   };
@@ -855,34 +1212,7 @@ export default function AdminRecognitionModule({
     }
   };
 
-  // History filtering
-  const filteredCertificates = useMemo(() => {
-    const q = historySearch.trim().toLowerCase();
-    return certificates.filter((cert) => {
-      if (historyEventFilter !== 'all' && cert.eventId !== historyEventFilter) {
-        return false;
-      }
-      if (
-        historyCategoryFilter !== 'all' &&
-        cert.categoryId !== historyCategoryFilter
-      ) {
-        return false;
-      }
-      if (q) {
-        const hay =
-          `${cert.participantName} ${cert.participantDepartment} ${cert.eventTitle} ${cert.categoryName} ${cert.certificateNumber}`.toLowerCase();
-        if (!hay.includes(q)) return false;
-      }
-      return true;
-    });
-  }, [
-    certificates,
-    historySearch,
-    historyEventFilter,
-    historyCategoryFilter,
-  ]);
-
-  const toggleHistoryCertSelect = (id: string) => {
+  const toggleRecapCertSelect = (id: string) => {
     setSelectedCertIds((prev) => {
       const next = new Set(prev);
       if (next.has(id)) next.delete(id);
@@ -900,6 +1230,9 @@ export default function AdminRecognitionModule({
         next.delete(id);
         return next;
       });
+      if (previewCert?.id === id) {
+        setPreviewCert(null);
+      }
     } catch (error) {
       handleFirestoreError(error, OperationType.DELETE, `certificates/${id}`);
     } finally {
@@ -907,11 +1240,7 @@ export default function AdminRecognitionModule({
     }
   };
 
-  const selectedBulkCerts = useMemo(() => {
-    if (selectedCertIds.size === 0) return filteredCertificates;
-    return filteredCertificates.filter((c) => selectedCertIds.has(c.id));
-  }, [filteredCertificates, selectedCertIds]);
-
+  // Studio Live Preview strings
   const previewBestTermLabel = useMemo(
     () =>
       resolveBestTermLabel(
@@ -934,7 +1263,7 @@ export default function AdminRecognitionModule({
     const ev = selectedEvent ?? events[0];
     return interpolateRecognitionWording(draftTemplate.wordingTemplate, {
       participant: eventParticipants[0]?.record.fullName || 'Dr. Sarah Jenkins',
-      category: previewBestTermLabel || selectedCategory?.name || 'Best Participant',
+      category: selectedCategory?.name || 'Best Participant',
       event: ev?.title || 'Teacher Professional Development Workshop',
       date: ev?.eventDate || formatLocalDateYmd(new Date()),
       venue: ev?.venue || 'Main Conference Hall',
@@ -949,7 +1278,6 @@ export default function AdminRecognitionModule({
   }, [
     draftTemplate.wordingTemplate,
     draftTemplate.picPdName,
-    previewBestTermLabel,
     selectedEvent,
     events,
     eventParticipants,
@@ -962,64 +1290,58 @@ export default function AdminRecognitionModule({
 
   return (
     <div className="space-y-6">
-      {/* Module Header & Sub-Navigation */}
+      {/* Module Header & 2 Sub-Menus: Choose Event & Certificate Studio */}
       <div className="bg-white border border-slate-200 rounded-2xl p-4 sm:p-5 flex flex-col lg:flex-row lg:items-center justify-between gap-4">
         <div>
           <h2 className="text-lg sm:text-xl font-bold text-slate-900">
             Certificates &amp; Recognition
           </h2>
           <p className="text-xs text-slate-600 mt-0.5">
-            Select standout participants manually or using evaluation &amp; attendance records, customize portrait/landscape templates, and issue bulk verified PDF certificates.
+            Select an event to award participants and review its synchronized certificate recap, or customize themes, categories, Term 1–4 distinctions, and signatures in Certificate Studio.
           </p>
         </div>
 
         <div
-          className="flex flex-wrap rounded-xl border border-slate-200 bg-slate-100 p-1 gap-1 self-start lg:self-auto"
+          className="inline-flex rounded-xl border border-slate-200 bg-slate-100 p-1 gap-1 self-start lg:self-auto shrink-0"
           role="tablist"
-          aria-label="Certificate and recognition sections"
+          aria-label="Certificate and recognition sub-menus"
         >
-          {(
-            [
-              { id: 'issue', label: 'Award & Issue', icon: Award },
-              { id: 'designer', label: 'Designer', icon: Palette },
-              {
-                id: 'categories',
-                label: `Categories (${categories.length})`,
-                icon: Tag,
-              },
-              {
-                id: 'history',
-                label: `History (${certificates.length})`,
-                icon: History,
-              },
-            ] as const
-          ).map((tab) => {
-            const Icon = tab.icon;
-            return (
-              <button
-                key={tab.id}
-                type="button"
-                role="tab"
-                aria-selected={subTab === tab.id}
-                onClick={() => setSubTab(tab.id)}
-                className={`min-h-[38px] px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors inline-flex items-center gap-1.5 whitespace-nowrap ${
-                  subTab === tab.id
-                    ? 'bg-white text-slate-900 shadow-xs'
-                    : 'text-slate-600 hover:text-slate-900'
-                }`}
-              >
-                <Icon className="w-3.5 h-3.5 text-amber-700" />
-                <span>{tab.label}</span>
-              </button>
-            );
-          })}
+          <button
+            type="button"
+            role="tab"
+            aria-selected={subTab === 'choose-event'}
+            onClick={() => setSubTab('choose-event')}
+            className={`min-h-[40px] px-4 py-1.5 rounded-lg text-xs sm:text-sm font-semibold transition-colors inline-flex items-center gap-2 whitespace-nowrap shrink-0 ${
+              subTab === 'choose-event'
+                ? 'bg-white text-slate-900 shadow-xs'
+                : 'text-slate-600 hover:text-slate-900'
+            }`}
+          >
+            <CalendarDays className="w-4 h-4 text-amber-700" />
+            <span>1. Choose Event</span>
+          </button>
+
+          <button
+            type="button"
+            role="tab"
+            aria-selected={subTab === 'studio'}
+            onClick={() => setSubTab('studio')}
+            className={`min-h-[40px] px-4 py-1.5 rounded-lg text-xs sm:text-sm font-semibold transition-colors inline-flex items-center gap-2 whitespace-nowrap shrink-0 ${
+              subTab === 'studio'
+                ? 'bg-white text-slate-900 shadow-xs'
+                : 'text-slate-600 hover:text-slate-900'
+            }`}
+          >
+            <Palette className="w-4 h-4 text-amber-700" />
+            <span>2. Certificate Studio</span>
+          </button>
         </div>
       </div>
 
-      {/* TAB 1: AWARD & ISSUE CERTIFICATES */}
-      {subTab === 'issue' && (
+      {/* SUB-MENU 1: CHOOSE EVENT (Award & Issue + Event Certificate Recognition Recap) */}
+      {subTab === 'choose-event' && (
         <div className="space-y-6">
-          {/* A. Event Integration Bar */}
+          {/* A. Event Selector & Recognition Category */}
           <section className="bg-white border border-slate-200 rounded-2xl p-5 sm:p-6 space-y-4">
             <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
               <div className="lg:col-span-6">
@@ -1027,7 +1349,7 @@ export default function AdminRecognitionModule({
                   htmlFor="rec-event-select"
                   className="block text-xs font-bold uppercase tracking-wider text-blue-700 mb-1.5"
                 >
-                  1. Event Integration (Auto-Populated)
+                  Choose Event
                 </label>
                 <select
                   id="rec-event-select"
@@ -1035,6 +1357,9 @@ export default function AdminRecognitionModule({
                   onChange={(e) => {
                     setSelectedEventId(e.target.value);
                     setSelectedAttendanceIds(new Set());
+                    setSelectedCertIds(new Set());
+                    setRecapCategoryFilter('all');
+                    setRecapSearch('');
                     setIssueError(null);
                     setIssueSuccess(null);
                   }}
@@ -1043,21 +1368,39 @@ export default function AdminRecognitionModule({
                   {events.length === 0 && (
                     <option value="">No events created yet</option>
                   )}
-                  {events.map((ev) => (
-                    <option key={ev.id} value={ev.id}>
-                      {ev.title} ({ev.eventDate})
-                    </option>
-                  ))}
+                  {events.map((ev) => {
+                    const count = certificates.filter(
+                      (c) => c.eventId === ev.id
+                    ).length;
+                    return (
+                      <option key={ev.id} value={ev.id}>
+                        {ev.title} ({ev.eventDate}) · {count} cert
+                        {count === 1 ? '' : 's'}
+                      </option>
+                    );
+                  })}
                 </select>
               </div>
 
               <div className="lg:col-span-6">
-                <label
-                  htmlFor="rec-category-select"
-                  className="block text-xs font-bold uppercase tracking-wider text-amber-700 mb-1.5"
-                >
-                  2. Recognition Category
-                </label>
+                <div className="flex items-center justify-between gap-2 mb-1.5">
+                  <label
+                    htmlFor="rec-category-select"
+                    className="block text-xs font-bold uppercase tracking-wider text-amber-700"
+                  >
+                    Recognition Category
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSubTab('studio');
+                      setStudioSection('categories');
+                    }}
+                    className="text-[11px] font-semibold text-blue-700 hover:underline whitespace-nowrap shrink-0"
+                  >
+                    Customize Categories in Studio
+                  </button>
+                </div>
                 <select
                   id="rec-category-select"
                   value={selectedCategoryId}
@@ -1078,7 +1421,7 @@ export default function AdminRecognitionModule({
             </div>
 
             {selectedEvent && (
-              <div className="rounded-xl border border-slate-200 bg-slate-50/70 p-4 grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 text-xs">
+              <div className="rounded-xl border border-slate-200 bg-slate-50/70 p-4 grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-3 text-xs">
                 <div>
                   <div className="text-slate-500 font-medium">Event Date</div>
                   <div className="font-mono-tabular font-bold text-slate-900 mt-0.5">
@@ -1098,9 +1441,7 @@ export default function AdminRecognitionModule({
                   </div>
                 </div>
                 <div>
-                  <div className="text-slate-500 font-medium">
-                    Topics / Sessions
-                  </div>
+                  <div className="text-slate-500 font-medium">Topic</div>
                   <div className="font-bold text-slate-900 truncate mt-0.5">
                     {selectedEvent.topic?.trim() || selectedEvent.category}
                   </div>
@@ -1117,18 +1458,35 @@ export default function AdminRecognitionModule({
                     {branding?.organizationName?.trim() || 'PRESENZA'}
                   </div>
                 </div>
+                <div>
+                  <div className="text-slate-500 font-medium">Checked In</div>
+                  <div className="font-mono-tabular font-bold text-slate-900 mt-0.5">
+                    {
+                      attendances.filter((a) => a.eventId === selectedEvent.id)
+                        .length
+                    }
+                  </div>
+                </div>
+                <div>
+                  <div className="text-slate-500 font-medium">
+                    Certificates Issued
+                  </div>
+                  <div className="font-mono-tabular font-bold text-amber-700 mt-0.5">
+                    {eventCertificates.length}
+                  </div>
+                </div>
               </div>
             )}
           </section>
 
-          {/* C. Participant Selection (Manual vs Evaluation-Based) */}
-          {selectedEvent && (
+          {/* B. Participant Selection & Issuing */}
+          {selectedEvent ? (
             <section className="bg-white border border-slate-200 rounded-2xl overflow-hidden">
               <div className="px-6 py-4 border-b border-slate-200 flex flex-col lg:flex-row lg:items-center justify-between gap-4">
                 <div>
-                  <div className="flex items-center gap-2">
+                  <div className="flex flex-wrap items-center gap-2.5">
                     <h3 className="text-base font-bold text-slate-900">
-                      3. Select Recipients
+                      Select Recipients for Award
                     </h3>
                     <div
                       className="inline-flex rounded-lg border border-slate-200 bg-slate-100 p-0.5"
@@ -1138,31 +1496,31 @@ export default function AdminRecognitionModule({
                       <button
                         type="button"
                         onClick={() => setSelectionMode('manual')}
-                        className={`px-2.5 py-1 rounded-md text-xs font-semibold transition-colors ${
+                        className={`px-2.5 py-1 rounded-md text-xs font-semibold transition-colors whitespace-nowrap shrink-0 ${
                           selectionMode === 'manual'
                             ? 'bg-white text-slate-900 shadow-xs'
                             : 'text-slate-600 hover:text-slate-900'
                         }`}
                       >
-                        Option 1: Manual Selection
+                        Manual Selection
                       </button>
                       <button
                         type="button"
                         onClick={() => setSelectionMode('evaluation')}
-                        className={`px-2.5 py-1 rounded-md text-xs font-semibold transition-colors ${
+                        className={`px-2.5 py-1 rounded-md text-xs font-semibold transition-colors whitespace-nowrap shrink-0 ${
                           selectionMode === 'evaluation'
                             ? 'bg-white text-slate-900 shadow-xs'
                             : 'text-slate-600 hover:text-slate-900'
                         }`}
                       >
-                        Option 2: Evaluation-Based Review
+                        Evaluation-Based Review
                       </button>
                     </div>
                   </div>
                   <p className="text-xs text-slate-500 mt-1">
                     {selectionMode === 'evaluation'
-                      ? 'Review check-in timeliness, arrival rank, and participant feedback alongside attendance to support your decision. Awards are only issued to people you explicitly select.'
-                      : 'Search event attendance records and check the participants you wish to recognize.'}
+                      ? 'Review check-in timeliness, arrival rank, and participant evaluation comments before issuing awards.'
+                      : 'Search checked-in attendees and select participants to award recognition certificates.'}
                   </p>
                 </div>
 
@@ -1181,7 +1539,7 @@ export default function AdminRecognitionModule({
                     type="button"
                     disabled={issuing || selectedAttendanceIds.size === 0}
                     onClick={() => void handleIssueSelectedCertificates()}
-                    className="min-h-[40px] px-4 py-2 rounded-xl bg-amber-600 hover:bg-amber-700 text-white text-xs font-semibold inline-flex items-center gap-1.5 disabled:opacity-50"
+                    className="min-h-[40px] px-4 py-2 rounded-xl bg-amber-600 hover:bg-amber-700 text-white text-xs font-semibold inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 disabled:opacity-50"
                   >
                     {issuing ? (
                       <Loader2 className="w-4 h-4 animate-spin" />
@@ -1202,14 +1560,18 @@ export default function AdminRecognitionModule({
               )}
 
               {issueSuccess && (
-                <div className="mx-6 mt-4 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-xs text-emerald-800 font-semibold flex items-center justify-between gap-2">
+                <div className="mx-6 mt-4 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-xs text-emerald-800 font-semibold flex flex-wrap items-center justify-between gap-2">
                   <span>{issueSuccess}</span>
                   <button
                     type="button"
-                    onClick={() => setSubTab('history')}
+                    onClick={() => {
+                      document
+                        .getElementById('event-certificate-recap')
+                        ?.scrollIntoView({ behavior: 'smooth' });
+                    }}
                     className="underline font-bold hover:text-emerald-950 shrink-0"
                   >
-                    View &amp; Download in History
+                    Jump to Event Recap
                   </button>
                 </div>
               )}
@@ -1239,7 +1601,7 @@ export default function AdminRecognitionModule({
                             Linked Feedback &amp; Evaluation Notes
                           </th>
                         )}
-                        <th className="py-3 px-4 text-right">Category Status</th>
+                        <th className="py-3 px-4 text-right">Status</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100">
@@ -1315,13 +1677,16 @@ export default function AdminRecognitionModule({
                               <td className="py-3 px-4">
                                 <div className="flex items-center gap-2 text-xs">
                                   <span
-                                    className={`px-2 py-0.5 rounded font-semibold border ${
+                                    className={`font-semibold ${
                                       record.status === 'On Time'
-                                        ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
-                                        : 'bg-amber-50 text-amber-800 border-amber-200'
+                                        ? 'text-emerald-700'
+                                        : 'text-amber-700'
                                     }`}
                                   >
                                     {record.status}
+                                  </span>
+                                  <span aria-hidden="true" className="text-slate-300">
+                                    ·
                                   </span>
                                   <span className="font-mono-tabular text-slate-500">
                                     {record.checkInTime}
@@ -1334,8 +1699,8 @@ export default function AdminRecognitionModule({
                                     <div className="space-y-0.5">
                                       <div className="inline-flex items-center gap-1 font-semibold text-amber-700">
                                         <Star className="w-3.5 h-3.5 fill-amber-400 text-amber-500" />
-                                        <span>
-                                          Gave {matchedFeedback.averageRating.toFixed(1)} ★ feedback
+                                        <span className="font-mono-tabular">
+                                          {matchedFeedback.averageRating.toFixed(1)} ★ feedback
                                         </span>
                                       </div>
                                       {matchedFeedback.writtenComment && (
@@ -1353,12 +1718,12 @@ export default function AdminRecognitionModule({
                               )}
                               <td className="py-3 px-4 text-right whitespace-nowrap">
                                 {alreadyIssued ? (
-                                  <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-md">
-                                    <CheckCircle2 className="w-3 h-3" />
-                                    <span>Already Issued</span>
+                                  <span className="inline-flex items-center gap-1 text-xs font-semibold text-emerald-700">
+                                    <CheckCircle2 className="w-3.5 h-3.5" />
+                                    <span>Issued</span>
                                   </span>
                                 ) : (
-                                  <span className="text-[11px] text-slate-400">
+                                  <span className="text-xs text-slate-400">
                                     Eligible
                                   </span>
                                 )}
@@ -1380,7 +1745,8 @@ export default function AdminRecognitionModule({
                 <div className="text-xs font-bold uppercase tracking-wider text-slate-700 inline-flex items-center gap-1.5">
                   <UserPlus className="w-3.5 h-3.5 text-blue-700" />
                   <span>
-                    Or Issue Directly to a Manual Nominee ({selectedCategory?.name || 'Category'})
+                    Or Issue Directly to a Manual Nominee (
+                    {selectedCategory?.name || 'Category'})
                   </span>
                 </div>
                 <div className="grid grid-cols-1 sm:grid-cols-4 gap-2.5">
@@ -1412,7 +1778,7 @@ export default function AdminRecognitionModule({
                   <button
                     type="submit"
                     disabled={issuing || !selectedCategory}
-                    className="min-h-[40px] px-4 py-1.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold inline-flex items-center justify-center gap-1.5 disabled:opacity-50"
+                    className="min-h-[40px] px-4 py-1.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold inline-flex items-center justify-center gap-1.5 whitespace-nowrap shrink-0 disabled:opacity-50"
                   >
                     <Award className="w-3.5 h-3.5" />
                     <span>Issue Single Certificate</span>
@@ -1420,618 +1786,1195 @@ export default function AdminRecognitionModule({
                 </div>
               </form>
             </section>
+          ) : (
+            <section className="bg-white border border-slate-200 rounded-2xl p-10 text-center space-y-2">
+              <CalendarDays className="w-9 h-9 text-slate-300 mx-auto" />
+              <p className="text-sm font-semibold text-slate-900">
+                No Events Created Yet
+              </p>
+              <p className="text-xs text-slate-500">
+                Create an event session from the Admin Console first to award and review recognition certificates here.
+              </p>
+            </section>
+          )}
+
+          {/* C. CERTIFICATE RECOGNITION RECAP FOR THIS CHOSEN EVENT */}
+          {selectedEvent && (
+            <section
+              id="event-certificate-recap"
+              className="bg-white border border-slate-200 rounded-2xl overflow-hidden"
+            >
+              <div className="p-5 sm:p-6 border-b border-slate-200 flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+                <div>
+                  <h3 className="text-base sm:text-lg font-bold text-slate-900">
+                    Certificate Recognition Recap — {selectedEvent.title}
+                  </h3>
+                  <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-slate-500">
+                    <span className="font-mono-tabular">
+                      {eventCertificates.length} certificate
+                      {eventCertificates.length === 1 ? '' : 's'} issued
+                    </span>
+                    <span aria-hidden="true">·</span>
+                    <span>
+                      Aligned with Studio ({templateConfig.orientation} ·{' '}
+                      {CERTIFICATE_THEMES[certificateSettings.themeId]?.name ||
+                        'Custom Theme'}
+                      {activeStudioTermLabel ? ` · ${activeStudioTermLabel}` : ''}
+                      )
+                    </span>
+                    <span aria-hidden="true">·</span>
+                    <button
+                      type="button"
+                      onClick={() => setSubTab('studio')}
+                      className="text-blue-700 font-semibold hover:underline"
+                    >
+                      Edit in Certificate Studio
+                    </button>
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    disabled={selectedRecapBulkCerts.length === 0}
+                    onClick={() =>
+                      downloadRecognitionCertificatesPdf(
+                        selectedRecapBulkCerts,
+                        templateConfig,
+                        branding,
+                        `${selectedEvent.title}-recap`,
+                        pdfBatchOptions
+                      )
+                    }
+                    className="min-h-[40px] px-3.5 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 disabled:opacity-50"
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                    <span>
+                      {selectedCertIds.size > 0
+                        ? `Download Selected (${selectedCertIds.size}) PDF`
+                        : `Download Event Recap (${filteredEventRecapCertificates.length}) PDF`}
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    disabled={selectedRecapBulkCerts.length === 0}
+                    onClick={() =>
+                      printRecognitionCertificatesPdf(
+                        selectedRecapBulkCerts,
+                        templateConfig,
+                        branding,
+                        pdfBatchOptions
+                      )
+                    }
+                    className="min-h-[40px] px-3.5 py-2 rounded-xl border border-slate-300 bg-white hover:bg-slate-100 text-slate-800 text-xs font-semibold inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 disabled:opacity-50"
+                  >
+                    <Printer className="w-3.5 h-3.5" />
+                    <span>Print</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Event Category Breakdown & Search Filter */}
+              <div className="px-5 py-3.5 bg-slate-50 border-b border-slate-200 space-y-3">
+                {eventRecapCategoryBreakdown.length > 0 && (
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => setRecapCategoryFilter('all')}
+                      className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap shrink-0 ${
+                        recapCategoryFilter === 'all'
+                          ? 'bg-slate-900 text-white'
+                          : 'bg-white border border-slate-200 text-slate-700 hover:bg-slate-100'
+                      }`}
+                    >
+                      All Categories ({eventCertificates.length})
+                    </button>
+                    {eventRecapCategoryBreakdown.map((item) => (
+                      <button
+                        key={item.categoryId}
+                        type="button"
+                        onClick={() => setRecapCategoryFilter(item.categoryId)}
+                        className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap shrink-0 ${
+                          recapCategoryFilter === item.categoryId
+                            ? 'bg-amber-600 text-white'
+                            : 'bg-white border border-slate-200 text-slate-700 hover:bg-slate-100'
+                        }`}
+                      >
+                        {item.name} ({item.count})
+                      </button>
+                    ))}
+                  </div>
+                )}
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                  <div className="relative">
+                    <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                    <input
+                      type="search"
+                      value={recapSearch}
+                      onChange={(e) => setRecapSearch(e.target.value)}
+                      placeholder="Search recipient, category, or Certificate ID..."
+                      className="w-full min-h-[38px] pl-9 pr-3 py-1.5 text-xs bg-white border border-slate-300 rounded-xl"
+                    />
+                  </div>
+
+                  <select
+                    value={recapCategoryFilter}
+                    onChange={(e) => setRecapCategoryFilter(e.target.value)}
+                    aria-label="Filter event recap by category"
+                    className="min-h-[38px] px-3 py-1.5 text-xs bg-white border border-slate-300 rounded-xl text-slate-800"
+                  >
+                    <option value="all">
+                      All Recognition Categories ({eventCertificates.length})
+                    </option>
+                    {categories.map((cat) => (
+                      <option key={cat.id} value={cat.id}>
+                        {cat.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              {filteredEventRecapCertificates.length === 0 ? (
+                <div className="p-10 text-center space-y-2">
+                  <Award className="w-8 h-8 text-slate-300 mx-auto" />
+                  <p className="text-sm font-semibold text-slate-900">
+                    {eventCertificates.length === 0
+                      ? `No certificates issued yet for "${selectedEvent.title}"`
+                      : 'No certificates match the current filter'}
+                  </p>
+                  <p className="text-xs text-slate-500">
+                    Select recipients above to issue certificates — every award automatically stays synchronized with Certificate Studio.
+                  </p>
+                </div>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left border-collapse text-sm">
+                    <thead>
+                      <tr className="border-b border-slate-200 bg-slate-50 text-xs font-semibold text-slate-600">
+                        <th className="py-3 px-4 w-10">Pick</th>
+                        <th className="py-3 px-4">Certificate ID</th>
+                        <th className="py-3 px-4">Recipient</th>
+                        <th className="py-3 px-4">Synced Category &amp; Term</th>
+                        <th className="py-3 px-4">Method</th>
+                        <th className="py-3 px-4">Issued Date</th>
+                        <th className="py-3 px-4 text-right">Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {filteredEventRecapCertificates.map((cert) => {
+                        const picked = selectedCertIds.has(cert.id);
+                        const liveCatName =
+                          categoriesById.get(cert.categoryId)?.name?.trim() ||
+                          cert.categoryName;
+                        const liveTermLabel = activeStudioTermLabel;
+                        return (
+                          <tr key={cert.id} className="hover:bg-slate-50/70">
+                            <td className="py-3 px-4">
+                              <button
+                                type="button"
+                                onClick={() => toggleRecapCertSelect(cert.id)}
+                                aria-label={`Select certificate ${cert.certificateNumber}`}
+                                className="text-slate-500 hover:text-blue-700"
+                              >
+                                {picked ? (
+                                  <CheckSquare className="w-4 h-4 text-blue-700" />
+                                ) : (
+                                  <Square className="w-4 h-4" />
+                                )}
+                              </button>
+                            </td>
+                            <td className="py-3 px-4 font-mono-tabular text-xs font-bold text-slate-800 whitespace-nowrap">
+                              {cert.certificateNumber}
+                            </td>
+                            <td className="py-3 px-4">
+                              <div className="font-semibold text-slate-900">
+                                {cert.participantName}
+                              </div>
+                              {cert.participantDepartment && (
+                                <div className="text-xs text-slate-500">
+                                  {cert.participantDepartment}
+                                </div>
+                              )}
+                            </td>
+                            <td className="py-3 px-4">
+                              <div className="text-xs font-bold text-amber-800">
+                                {liveCatName}
+                              </div>
+                              {liveTermLabel &&
+                                liveTermLabel.toLowerCase() !==
+                                  liveCatName.toLowerCase() && (
+                                  <div className="text-[11px] font-medium text-slate-500 mt-0.5">
+                                    {liveTermLabel}
+                                  </div>
+                                )}
+                            </td>
+                            <td className="py-3 px-4 text-xs text-slate-600 capitalize whitespace-nowrap">
+                              {cert.selectionMethod === 'evaluation'
+                                ? 'Evaluation Review'
+                                : 'Manual'}
+                            </td>
+                            <td className="py-3 px-4 font-mono-tabular text-xs text-slate-600 whitespace-nowrap">
+                              {cert.issueDate}
+                            </td>
+                            <td className="py-3 px-4 text-right whitespace-nowrap">
+                              <div className="inline-flex items-center gap-1.5">
+                                <button
+                                  type="button"
+                                  onClick={() => setPreviewCert(cert)}
+                                  className="min-h-[34px] px-2.5 py-1 rounded-lg border border-slate-300 bg-white hover:bg-slate-100 text-xs font-semibold text-slate-800 inline-flex items-center gap-1"
+                                >
+                                  <Eye className="w-3.5 h-3.5 text-blue-700" />
+                                  <span>Preview</span>
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    downloadRecognitionCertificatesPdf(
+                                      [cert],
+                                      templateConfig,
+                                      branding,
+                                      undefined,
+                                      pdfBatchOptions
+                                    )
+                                  }
+                                  className="min-h-[34px] px-2.5 py-1 rounded-lg border border-slate-300 bg-white hover:bg-slate-100 text-xs font-semibold text-slate-800 inline-flex items-center gap-1"
+                                >
+                                  <Download className="w-3.5 h-3.5" />
+                                  <span>PDF</span>
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    printRecognitionCertificatesPdf(
+                                      [cert],
+                                      templateConfig,
+                                      branding,
+                                      pdfBatchOptions
+                                    )
+                                  }
+                                  className="min-h-[34px] min-w-[34px] rounded-lg border border-slate-300 bg-white hover:bg-slate-100 text-slate-700 inline-flex items-center justify-center"
+                                  aria-label={`Print certificate ${cert.certificateNumber}`}
+                                >
+                                  <Printer className="w-3.5 h-3.5" />
+                                </button>
+                                <button
+                                  type="button"
+                                  disabled={deletingCertId === cert.id}
+                                  onClick={() => void handleDeleteCertificate(cert.id)}
+                                  className="min-h-[34px] min-w-[34px] rounded-lg border border-slate-200 text-rose-700 hover:bg-rose-50 inline-flex items-center justify-center disabled:opacity-40"
+                                  aria-label={`Revoke certificate ${cert.certificateNumber}`}
+                                >
+                                  {deletingCertId === cert.id ? (
+                                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                  ) : (
+                                    <Trash2 className="w-3.5 h-3.5" />
+                                  )}
+                                </button>
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </section>
           )}
         </div>
       )}
 
-      {/* TAB 2: RECOGNITION CERTIFICATE DESIGNER */}
-      {subTab === 'designer' && (
+      {/* SUB-MENU 2: CERTIFICATE STUDIO (Unified Theme, Categories, Term 1–4, Wording & Signatories) */}
+      {subTab === 'studio' && (
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
           {/* Controls Column */}
           <section className="lg:col-span-5 bg-white border border-slate-200 rounded-2xl p-5 sm:p-6 space-y-5">
             <div className="flex items-center justify-between gap-2 pb-3 border-b border-slate-200">
-              <h3 className="text-base font-bold text-slate-900">
-                Certificate Template Designer
-              </h3>
+              <div>
+                <h3 className="text-base font-bold text-slate-900">
+                  Certificate Studio
+                </h3>
+                <p className="text-[11px] text-slate-500 mt-0.5">
+                  All edits synchronize with every event&rsquo;s certificate recap and PDF exports.
+                </p>
+              </div>
               <button
                 type="button"
-                onClick={() => setDraftTemplate({ ...DEFAULT_RECOGNITION_TEMPLATE })}
-                className="text-xs font-semibold text-slate-600 hover:text-slate-900 inline-flex items-center gap-1"
+                onClick={() => {
+                  setDraftTemplate({ ...DEFAULT_RECOGNITION_TEMPLATE });
+                  setDraftThemeId('classic-navy');
+                  setDraftBgDataUrl('');
+                  setDraftBgOpacity(22);
+                }}
+                className="text-xs font-semibold text-slate-600 hover:text-slate-900 inline-flex items-center gap-1 whitespace-nowrap shrink-0"
               >
                 <RotateCcw className="w-3.5 h-3.5" />
                 <span>Reset</span>
               </button>
             </div>
 
-            {/* Orientation & Font */}
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <div className="text-xs font-semibold text-slate-700 mb-1.5">
-                  Page Orientation
-                </div>
-                <div className="grid grid-cols-2 gap-1.5 p-1 bg-slate-100 rounded-xl">
-                  {(['landscape', 'portrait'] as const).map((orient) => (
-                    <button
-                      key={orient}
-                      type="button"
-                      onClick={() =>
-                        setDraftTemplate((prev) => ({
-                          ...prev,
-                          orientation: orient,
-                        }))
-                      }
-                      className={`min-h-[34px] rounded-lg text-xs font-semibold capitalize transition-colors ${
-                        draftTemplate.orientation === orient
-                          ? 'bg-white text-slate-900 shadow-xs'
-                          : 'text-slate-600 hover:text-slate-900'
-                      }`}
-                    >
-                      {orient}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              <div>
-                <label
-                  htmlFor="rec-font-select"
-                  className="block text-xs font-semibold text-slate-700 mb-1.5"
+            {/* Studio Internal Section Switcher */}
+            <div
+              className="grid grid-cols-3 gap-1 p-1 bg-slate-100 rounded-xl"
+              role="group"
+              aria-label="Certificate studio sections"
+            >
+              {(
+                [
+                  { id: 'theme', label: 'Theme & Layout' },
+                  { id: 'categories', label: `Categories (${categories.length})` },
+                  { id: 'signatories', label: 'Text & Signatories' },
+                ] as const
+              ).map((sec) => (
+                <button
+                  key={sec.id}
+                  type="button"
+                  onClick={() => setStudioSection(sec.id)}
+                  className={`min-h-[36px] px-2 py-1.5 rounded-lg text-[11px] sm:text-xs font-semibold transition-colors whitespace-nowrap ${
+                    studioSection === sec.id
+                      ? 'bg-white text-slate-900 shadow-xs'
+                      : 'text-slate-600 hover:text-slate-900'
+                  }`}
                 >
-                  Typography Font
-                </label>
-                <select
-                  id="rec-font-select"
-                  value={draftTemplate.fontFamily}
-                  onChange={(e) =>
-                    setDraftTemplate((prev) => ({
-                      ...prev,
-                      fontFamily: e.target.value as RecognitionFontFamily,
-                    }))
-                  }
-                  className="w-full min-h-[40px] px-3 py-1.5 text-xs bg-slate-50 border border-slate-300 rounded-xl font-semibold text-slate-900"
-                >
-                  <option value="times">Classic Serif (Times)</option>
-                  <option value="helvetica">Clean Sans (Helvetica)</option>
-                  <option value="courier">Archival Mono (Courier)</option>
-                </select>
-              </div>
+                  {sec.label}
+                </button>
+              ))}
             </div>
 
-            {/* Color Presets + Custom Pickers */}
-            <div className="space-y-2.5">
-              <div className="text-xs font-semibold text-slate-700">
-                Color Theme Presets &amp; Custom Colors
-              </div>
-              <div className="flex flex-wrap gap-1.5">
-                {COLOR_PRESETS.map((preset) => (
-                  <button
-                    key={preset.name}
-                    type="button"
-                    onClick={() =>
-                      setDraftTemplate((prev) => ({
-                        ...prev,
-                        primaryColor: preset.primaryColor,
-                        accentColor: preset.accentColor,
-                        paperColor: preset.paperColor,
-                      }))
-                    }
-                    className="px-2.5 py-1 rounded-lg border border-slate-200 bg-slate-50 hover:bg-slate-100 text-[11px] font-semibold text-slate-700 inline-flex items-center gap-1.5"
-                  >
-                    <span
-                      className="w-2.5 h-2.5 rounded-full border border-slate-300"
-                      style={{ backgroundColor: preset.primaryColor }}
-                    />
-                    <span>{preset.name}</span>
-                  </button>
-                ))}
-              </div>
-              <div className="grid grid-cols-3 gap-2 pt-1">
-                <label className="text-[11px] text-slate-600 font-medium space-y-1">
-                  <span>Primary</span>
-                  <input
-                    type="color"
-                    value={draftTemplate.primaryColor}
-                    onChange={(e) =>
-                      setDraftTemplate((prev) => ({
-                        ...prev,
-                        primaryColor: e.target.value,
-                      }))
-                    }
-                    className="w-full h-9 rounded-lg border border-slate-300 cursor-pointer"
-                  />
-                </label>
-                <label className="text-[11px] text-slate-600 font-medium space-y-1">
-                  <span>Accent</span>
-                  <input
-                    type="color"
-                    value={draftTemplate.accentColor}
-                    onChange={(e) =>
-                      setDraftTemplate((prev) => ({
-                        ...prev,
-                        accentColor: e.target.value,
-                      }))
-                    }
-                    className="w-full h-9 rounded-lg border border-slate-300 cursor-pointer"
-                  />
-                </label>
-                <label className="text-[11px] text-slate-600 font-medium space-y-1">
-                  <span>Paper</span>
-                  <input
-                    type="color"
-                    value={draftTemplate.paperColor}
-                    onChange={(e) =>
-                      setDraftTemplate((prev) => ({
-                        ...prev,
-                        paperColor: e.target.value,
-                      }))
-                    }
-                    className="w-full h-9 rounded-lg border border-slate-300 cursor-pointer"
-                  />
-                </label>
-              </div>
-            </div>
+            {/* STUDIO SECTION A: THEME, BACKGROUND PHOTO & LAYOUT */}
+            {studioSection === 'theme' && (
+              <div className="space-y-5">
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <div className="text-xs font-semibold text-slate-700 mb-1.5">
+                      Page Orientation
+                    </div>
+                    <div className="grid grid-cols-2 gap-1.5 p-1 bg-slate-100 rounded-xl">
+                      {(['landscape', 'portrait'] as const).map((orient) => (
+                        <button
+                          key={orient}
+                          type="button"
+                          onClick={() =>
+                            setDraftTemplate((prev) => ({
+                              ...prev,
+                              orientation: orient,
+                            }))
+                          }
+                          className={`min-h-[34px] rounded-lg text-xs font-semibold capitalize transition-colors ${
+                            draftTemplate.orientation === orient
+                              ? 'bg-white text-slate-900 shadow-xs'
+                              : 'text-slate-600 hover:text-slate-900'
+                          }`}
+                        >
+                          {orient}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
 
-            {/* Editable Title, Subtitle & Wording */}
-            <div className="space-y-3">
-              <div>
-                <label
-                  htmlFor="rec-title-input"
-                  className="block text-xs font-semibold text-slate-700 mb-1"
-                >
-                  Certificate Title
-                </label>
-                <input
-                  id="rec-title-input"
-                  type="text"
-                  maxLength={120}
-                  value={draftTemplate.title}
-                  onChange={(e) =>
-                    setDraftTemplate((prev) => ({
-                      ...prev,
-                      title: e.target.value,
-                    }))
-                  }
-                  className="w-full min-h-[40px] px-3 py-1.5 text-sm border border-slate-300 rounded-xl"
-                />
-              </div>
-
-              <div>
-                <label
-                  htmlFor="rec-subtitle-input"
-                  className="block text-xs font-semibold text-slate-700 mb-1"
-                >
-                  Subtitle
-                </label>
-                <input
-                  id="rec-subtitle-input"
-                  type="text"
-                  maxLength={140}
-                  value={draftTemplate.subtitle}
-                  onChange={(e) =>
-                    setDraftTemplate((prev) => ({
-                      ...prev,
-                      subtitle: e.target.value,
-                    }))
-                  }
-                  className="w-full min-h-[40px] px-3 py-1.5 text-xs border border-slate-300 rounded-xl"
-                />
-              </div>
-
-              <div>
-                <label
-                  htmlFor="rec-wording-input"
-                  className="block text-xs font-semibold text-slate-700 mb-1"
-                >
-                  Wording Template
-                </label>
-                <textarea
-                  id="rec-wording-input"
-                  rows={3}
-                  maxLength={600}
-                  value={draftTemplate.wordingTemplate}
-                  onChange={(e) =>
-                    setDraftTemplate((prev) => ({
-                      ...prev,
-                      wordingTemplate: e.target.value,
-                    }))
-                  }
-                  className="w-full px-3 py-2 text-xs border border-slate-300 rounded-xl"
-                />
-                <div className="mt-1.5 flex flex-wrap gap-1">
-                  {PLACEHOLDER_TOKENS.map((tok) => (
-                    <button
-                      key={tok}
-                      type="button"
-                      onClick={() =>
+                  <div>
+                    <label
+                      htmlFor="rec-font-select"
+                      className="block text-xs font-semibold text-slate-700 mb-1.5"
+                    >
+                      Typography Font
+                    </label>
+                    <select
+                      id="rec-font-select"
+                      value={draftTemplate.fontFamily}
+                      onChange={(e) =>
                         setDraftTemplate((prev) => ({
                           ...prev,
-                          wordingTemplate: `${prev.wordingTemplate} ${tok}`.slice(
-                            0,
-                            600
-                          ),
+                          fontFamily: e.target.value as RecognitionFontFamily,
                         }))
                       }
-                      className="text-[10px] font-mono-tabular px-1.5 py-0.5 rounded bg-slate-100 hover:bg-slate-200 text-slate-700"
+                      className="w-full min-h-[40px] px-3 py-1.5 text-xs bg-slate-50 border border-slate-300 rounded-xl font-semibold text-slate-900"
                     >
-                      +{tok}
-                    </button>
-                  ))}
+                      <option value="times">Classic Serif (Times)</option>
+                      <option value="helvetica">Clean Sans (Helvetica)</option>
+                      <option value="courier">Archival Mono (Courier)</option>
+                    </select>
+                  </div>
                 </div>
-              </div>
-            </div>
 
-            {/* Best Category for Term 1 – Term 4 */}
-            <div className="pt-3 border-t border-slate-200 space-y-3">
-              <div>
-                <div className="text-xs font-bold text-slate-900">
-                  Best Category by Term (Term 1 – Term 4)
-                </div>
-                <p className="text-[11px] text-slate-500 mt-0.5">
-                  Activate a term award ribbon on the certificate template and customize each term&rsquo;s category title.
-                </p>
-              </div>
-
-              <div
-                className="grid grid-cols-5 gap-1 p-1 bg-slate-100 rounded-xl"
-                role="group"
-                aria-label="Best category term selector"
-              >
-                {CERTIFICATE_TERM_OPTIONS.map((opt) => {
-                  const active = draftTemplate.bestTerm === opt.key;
-                  return (
-                    <button
-                      key={opt.key}
-                      type="button"
-                      onClick={() =>
-                        setDraftTemplate((prev) => ({
-                          ...prev,
-                          bestTerm: opt.key as CertificateTermKey,
-                        }))
-                      }
-                      className={`min-h-[34px] px-1.5 py-1 rounded-lg text-[11px] font-semibold transition-colors ${
-                        active
-                          ? 'bg-white text-slate-900 shadow-xs'
-                          : 'text-slate-600 hover:text-slate-900'
-                      }`}
-                    >
-                      {opt.shortLabel}
-                    </button>
-                  );
-                })}
-              </div>
-
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-                {(['term1', 'term2', 'term3', 'term4'] as const).map(
-                  (tKey, idx) => (
-                    <div key={tKey}>
-                      <label
-                        htmlFor={`rec-term-${tKey}`}
-                        className="block text-[11px] font-semibold text-slate-700 mb-1"
-                      >
-                        Term {idx + 1} Category Name
-                      </label>
+                {/* Theme Presets & Hex Colors */}
+                <div className="space-y-2.5">
+                  <div className="text-xs font-semibold text-slate-700">
+                    Certificate Theme Presets &amp; Custom Colors
+                  </div>
+                  <div className="flex flex-wrap gap-1.5">
+                    {STUDIO_COLOR_PRESETS.map((preset) => {
+                      const active =
+                        draftThemeId === preset.themeId &&
+                        draftTemplate.primaryColor.toLowerCase() ===
+                          preset.primaryColor.toLowerCase();
+                      return (
+                        <button
+                          key={preset.themeId}
+                          type="button"
+                          onClick={() => {
+                            setDraftThemeId(preset.themeId);
+                            setDraftTemplate((prev) => ({
+                              ...prev,
+                              primaryColor: preset.primaryColor,
+                              accentColor: preset.accentColor,
+                              paperColor: preset.paperColor,
+                            }));
+                          }}
+                          className={`px-2.5 py-1.5 rounded-lg border text-[11px] font-semibold inline-flex items-center gap-1.5 transition-colors ${
+                            active
+                              ? 'border-blue-600 bg-blue-50 text-blue-900'
+                              : 'border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-700'
+                          }`}
+                        >
+                          <span
+                            className="w-2.5 h-2.5 rounded-full border border-slate-300 shrink-0"
+                            style={{ backgroundColor: preset.primaryColor }}
+                          />
+                          <span>{preset.name}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <div className="grid grid-cols-3 gap-2 pt-1">
+                    <label className="text-[11px] text-slate-600 font-medium space-y-1">
+                      <span>Primary</span>
                       <input
-                        id={`rec-term-${tKey}`}
-                        type="text"
-                        maxLength={100}
-                        value={draftTemplate.termBestCategories[tKey]}
-                        placeholder={DEFAULT_TERM_BEST_CATEGORIES[tKey]}
+                        type="color"
+                        value={draftTemplate.primaryColor}
                         onChange={(e) =>
                           setDraftTemplate((prev) => ({
                             ...prev,
-                            termBestCategories: {
-                              ...prev.termBestCategories,
-                              [tKey]: e.target.value,
-                            },
+                            primaryColor: e.target.value,
                           }))
                         }
-                        className="w-full min-h-[36px] px-2.5 py-1 text-xs border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-600"
+                        className="w-full h-9 rounded-lg border border-slate-300 cursor-pointer"
                       />
-                    </div>
-                  )
-                )}
-              </div>
-            </div>
-
-            {/* Logo & Native Bottom Signatory Controls */}
-            <div className="pt-3 border-t border-slate-200 space-y-4">
-              <input
-                ref={logoUploadRef}
-                type="file"
-                accept="image/png,image/jpeg,image/webp,.png,.jpg,.jpeg,.webp"
-                onChange={(e) => {
-                  const file = e.target.files?.[0];
-                  e.target.value = '';
-                  if (file) void handleUploadCustomLogo(file);
-                }}
-                className="hidden"
-              />
-              <input
-                ref={picPdSigUploadRef}
-                type="file"
-                accept="image/png,image/jpeg,image/webp,.png,.jpg,.jpeg,.webp"
-                onChange={(e) => {
-                  const file = e.target.files?.[0];
-                  e.target.value = '';
-                  if (file) void handleUploadSignature('picPd', file);
-                }}
-                className="hidden"
-                aria-label="Upload PIC of Professional Development signature"
-              />
-              <input
-                ref={principalSigUploadRef}
-                type="file"
-                accept="image/png,image/jpeg,image/webp,.png,.jpg,.jpeg,.webp"
-                onChange={(e) => {
-                  const file = e.target.files?.[0];
-                  e.target.value = '';
-                  if (file) void handleUploadSignature('principal', file);
-                }}
-                className="hidden"
-                aria-label="Upload Principal signature"
-              />
-
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <span className="text-xs font-semibold text-slate-700">
-                  Institution Logo
-                </span>
-                <div className="flex items-center gap-1.5">
-                  <button
-                    type="button"
-                    onClick={() => logoUploadRef.current?.click()}
-                    className="min-h-[34px] px-3 py-1 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 text-xs font-semibold text-slate-700 inline-flex items-center gap-1"
-                  >
-                    <ImagePlus className="w-3.5 h-3.5 text-blue-700" />
-                    <span>
-                      {draftTemplate.customLogoDataUrl
-                        ? 'Change Logo'
-                        : 'Upload Custom Logo'}
-                    </span>
-                  </button>
-                  {draftTemplate.customLogoDataUrl && (
-                    <button
-                      type="button"
-                      onClick={() =>
-                        setDraftTemplate((prev) => ({
-                          ...prev,
-                          customLogoDataUrl: '',
-                        }))
-                      }
-                      className="min-h-[34px] px-2.5 py-1 rounded-lg border border-rose-200 bg-rose-50 text-xs font-semibold text-rose-700"
-                    >
-                      Use Default
-                    </button>
-                  )}
+                    </label>
+                    <label className="text-[11px] text-slate-600 font-medium space-y-1">
+                      <span>Accent</span>
+                      <input
+                        type="color"
+                        value={draftTemplate.accentColor}
+                        onChange={(e) =>
+                          setDraftTemplate((prev) => ({
+                            ...prev,
+                            accentColor: e.target.value,
+                          }))
+                        }
+                        className="w-full h-9 rounded-lg border border-slate-300 cursor-pointer"
+                      />
+                    </label>
+                    <label className="text-[11px] text-slate-600 font-medium space-y-1">
+                      <span>Paper</span>
+                      <input
+                        type="color"
+                        value={draftTemplate.paperColor}
+                        onChange={(e) =>
+                          setDraftTemplate((prev) => ({
+                            ...prev,
+                            paperColor: e.target.value,
+                          }))
+                        }
+                        className="w-full h-9 rounded-lg border border-slate-300 cursor-pointer"
+                      />
+                    </label>
+                  </div>
                 </div>
-              </div>
 
-              <div>
-                <div className="text-xs font-bold text-slate-900">
-                  Bottom Signatories (Native Template)
-                </div>
-                <p className="text-[11px] text-slate-500 mt-0.5">
-                  The bottom of the certificate provides PIC of Professional Development and Principal. Customize their names and upload or draw each signature.
-                </p>
-              </div>
-
-              {(
-                [
-                  {
-                    role: 'picPd' as const,
-                    heading: '1. PIC of Professional Development',
-                    nameValue: draftTemplate.picPdName,
-                    namePlaceholder: 'e.g., Ms. Elena Vance, M.Ed.',
-                    titleValue: draftTemplate.picPdTitle,
-                    defaultTitle: 'PIC of Professional Development',
-                    signatureUrl: draftTemplate.picPdSignatureDataUrl,
-                    uploadRef: picPdSigUploadRef,
-                    onNameChange: (val: string) =>
-                      setDraftTemplate((prev) => ({ ...prev, picPdName: val })),
-                    onTitleChange: (val: string) =>
-                      setDraftTemplate((prev) => ({
-                        ...prev,
-                        picPdTitle: val,
-                        signatoryLabel: val,
-                      })),
-                    onClearSig: () =>
-                      setDraftTemplate((prev) => ({
-                        ...prev,
-                        picPdSignatureDataUrl: '',
-                        signatureDataUrl: '',
-                      })),
-                  },
-                  {
-                    role: 'principal' as const,
-                    heading: '2. Principal',
-                    nameValue: draftTemplate.principalName,
-                    namePlaceholder: 'e.g., Dr. Ahmad Fauzi',
-                    titleValue: draftTemplate.principalTitle,
-                    defaultTitle: 'Principal',
-                    signatureUrl: draftTemplate.principalSignatureDataUrl,
-                    uploadRef: principalSigUploadRef,
-                    onNameChange: (val: string) =>
-                      setDraftTemplate((prev) => ({
-                        ...prev,
-                        principalName: val,
-                      })),
-                    onTitleChange: (val: string) =>
-                      setDraftTemplate((prev) => ({
-                        ...prev,
-                        principalTitle: val,
-                      })),
-                    onClearSig: () =>
-                      setDraftTemplate((prev) => ({
-                        ...prev,
-                        principalSignatureDataUrl: '',
-                      })),
-                  },
-                ] as const
-              ).map((sig) => (
-                <div
-                  key={sig.role}
-                  className="rounded-xl border border-slate-200 bg-slate-50/70 p-3.5 space-y-2.5"
-                >
+                {/* Certificate Background Photo & Transparency */}
+                <div className="pt-3 border-t border-slate-200 space-y-3">
+                  <input
+                    ref={bgUploadRef}
+                    type="file"
+                    accept="image/png,image/jpeg,image/webp,.png,.jpg,.jpeg,.webp"
+                    onChange={(e) => {
+                      const file = e.target.files?.[0];
+                      e.target.value = '';
+                      if (file) void handleUploadBgPhoto(file);
+                    }}
+                    className="hidden"
+                    aria-label="Upload certificate background photo"
+                  />
                   <div className="flex flex-wrap items-center justify-between gap-2">
-                    <span className="text-xs font-bold text-slate-800">
-                      {sig.heading}
-                    </span>
+                    <div>
+                      <div className="text-xs font-semibold text-slate-700">
+                        Background Photo / Watermark
+                      </div>
+                      <p className="text-[11px] text-slate-500">
+                        Synced across live certificate preview and event PDF downloads.
+                      </p>
+                    </div>
                     <div className="flex items-center gap-1.5">
                       <button
                         type="button"
-                        onClick={() => sig.uploadRef.current?.click()}
-                        className="min-h-[32px] px-2.5 py-1 rounded-lg border border-slate-300 bg-white hover:bg-slate-100 text-[11px] font-semibold text-slate-700 inline-flex items-center gap-1"
+                        onClick={() => bgUploadRef.current?.click()}
+                        className="min-h-[34px] px-3 py-1 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 text-xs font-semibold text-slate-700 inline-flex items-center gap-1"
                       >
                         <ImagePlus className="w-3.5 h-3.5 text-blue-700" />
-                        <span>Upload Signature</span>
+                        <span>{draftBgDataUrl ? 'Change Photo' : 'Upload Photo'}</span>
                       </button>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setDrawingRole((prev) =>
-                            prev === sig.role ? null : sig.role
-                          );
-                          window.setTimeout(() => handleClearDrawCanvas(), 0);
-                        }}
-                        className="min-h-[32px] px-2.5 py-1 rounded-lg border border-slate-300 bg-white hover:bg-slate-100 text-[11px] font-semibold text-slate-700 inline-flex items-center gap-1"
-                      >
-                        <PenTool className="w-3.5 h-3.5 text-blue-700" />
-                        <span>Draw</span>
-                      </button>
-                      {sig.signatureUrl && (
+                      {draftBgDataUrl && (
                         <button
                           type="button"
-                          onClick={sig.onClearSig}
-                          className="min-h-[32px] px-2 py-1 rounded-lg border border-rose-200 bg-rose-50 text-[11px] font-semibold text-rose-700"
+                          onClick={() => setDraftBgDataUrl('')}
+                          className="min-h-[34px] px-2.5 py-1 rounded-lg border border-rose-200 bg-rose-50 text-xs font-semibold text-rose-700"
                         >
-                          Clear
+                          Remove
                         </button>
                       )}
                     </div>
                   </div>
 
-                  {sig.signatureUrl && (
-                    <div className="h-14 rounded-lg border border-dashed border-slate-300 bg-white flex items-center justify-center p-1.5 overflow-hidden">
-                      <img
-                        src={sig.signatureUrl}
-                        alt={`${sig.heading} signature preview`}
-                        className="max-h-full max-w-full object-contain"
+                  {draftBgDataUrl && (
+                    <div className="space-y-1.5">
+                      <div className="flex items-center justify-between text-[11px] text-slate-600 font-medium">
+                        <span>Background Opacity</span>
+                        <span className="font-mono-tabular font-bold">
+                          {draftBgOpacity}%
+                        </span>
+                      </div>
+                      <input
+                        type="range"
+                        min={0}
+                        max={85}
+                        value={draftBgOpacity}
+                        onChange={(e) => setDraftBgOpacity(Number(e.target.value))}
+                        className="w-full accent-blue-700"
                       />
                     </div>
                   )}
+                </div>
 
-                  {drawingRole === sig.role && (
-                    <div className="rounded-lg border border-blue-200 bg-white p-2.5 space-y-2">
-                      <canvas
-                        ref={drawCanvasRef}
-                        width={360}
-                        height={110}
-                        onPointerDown={handleStartDraw}
-                        onPointerMove={handleMoveDraw}
-                        onPointerUp={handleEndDraw}
-                        onPointerLeave={handleEndDraw}
-                        className="w-full h-24 bg-slate-50 border border-slate-300 rounded-md touch-none cursor-crosshair"
+                {/* Visibility Toggles */}
+                <div className="pt-3 border-t border-slate-200 flex flex-wrap gap-4 text-xs font-medium text-slate-700">
+                  <label className="inline-flex items-center gap-1.5">
+                    <input
+                      type="checkbox"
+                      checked={draftTemplate.showTopic}
+                      onChange={(e) =>
+                        setDraftTemplate((prev) => ({
+                          ...prev,
+                          showTopic: e.target.checked,
+                        }))
+                      }
+                    />
+                    <span>Show Topic / Theme</span>
+                  </label>
+                  <label className="inline-flex items-center gap-1.5">
+                    <input
+                      type="checkbox"
+                      checked={draftTemplate.showCertificateId}
+                      onChange={(e) =>
+                        setDraftTemplate((prev) => ({
+                          ...prev,
+                          showCertificateId: e.target.checked,
+                        }))
+                      }
+                    />
+                    <span>Show Certificate ID</span>
+                  </label>
+                </div>
+              </div>
+            )}
+
+            {/* STUDIO SECTION B: ALL RECOGNITION CATEGORIES & TERM 1–4 */}
+            {studioSection === 'categories' && (
+              <div className="space-y-5">
+                {/* Best Category for Term 1 – Term 4 */}
+                <div className="space-y-3">
+                  <div>
+                    <div className="text-xs font-bold text-slate-900">
+                      Best Category by Term (Term 1 – Term 4)
+                    </div>
+                    <p className="text-[11px] text-slate-500 mt-0.5">
+                      Activate a term distinction ribbon and customize each term&rsquo;s title. Saving aligns this across all events.
+                    </p>
+                  </div>
+
+                  <div
+                    className="grid grid-cols-5 gap-1 p-1 bg-slate-100 rounded-xl"
+                    role="group"
+                    aria-label="Best category term selector"
+                  >
+                    {CERTIFICATE_TERM_OPTIONS.map((opt) => {
+                      const active = draftTemplate.bestTerm === opt.key;
+                      return (
+                        <button
+                          key={opt.key}
+                          type="button"
+                          onClick={() =>
+                            setDraftTemplate((prev) => ({
+                              ...prev,
+                              bestTerm: opt.key as CertificateTermKey,
+                            }))
+                          }
+                          className={`min-h-[34px] px-1.5 py-1 rounded-lg text-[11px] font-semibold transition-colors ${
+                            active
+                              ? 'bg-white text-slate-900 shadow-xs'
+                              : 'text-slate-600 hover:text-slate-900'
+                          }`}
+                        >
+                          {opt.shortLabel}
+                        </button>
+                      );
+                    })}
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                    {(['term1', 'term2', 'term3', 'term4'] as const).map(
+                      (tKey, idx) => (
+                        <div key={tKey}>
+                          <label
+                            htmlFor={`rec-term-${tKey}`}
+                            className="block text-[11px] font-semibold text-slate-700 mb-1"
+                          >
+                            Term {idx + 1} Title
+                          </label>
+                          <input
+                            id={`rec-term-${tKey}`}
+                            type="text"
+                            maxLength={100}
+                            value={draftTemplate.termBestCategories[tKey]}
+                            placeholder={DEFAULT_TERM_BEST_CATEGORIES[tKey]}
+                            onChange={(e) =>
+                              setDraftTemplate((prev) => ({
+                                ...prev,
+                                termBestCategories: {
+                                  ...prev.termBestCategories,
+                                  [tKey]: e.target.value,
+                                },
+                              }))
+                            }
+                            className="w-full min-h-[36px] px-2.5 py-1 text-xs border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-600"
+                          />
+                        </div>
+                      )
+                    )}
+                  </div>
+                </div>
+
+                {/* All Recognition Categories Customization */}
+                <div className="pt-4 border-t border-slate-200 space-y-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div>
+                      <div className="text-xs font-bold text-slate-900">
+                        All Recognition Categories ({categories.length})
+                      </div>
+                      <p className="text-[11px] text-slate-500 mt-0.5">
+                        Add, rename, or delete categories. Renamed categories update automatically in every event&rsquo;s recap.
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      disabled={seedingCategories}
+                      onClick={() => void seedDefaultCategories()}
+                      className="min-h-[32px] px-2.5 py-1 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 text-[11px] font-semibold text-slate-800 inline-flex items-center gap-1"
+                    >
+                      {seedingCategories ? (
+                        <Loader2 className="w-3 h-3 animate-spin" />
+                      ) : (
+                        <Sparkles className="w-3 h-3 text-amber-600" />
+                      )}
+                      <span>Restore Defaults</span>
+                    </button>
+                  </div>
+
+                  <form
+                    onSubmit={handleAddCategory}
+                    className="space-y-2 p-3 rounded-xl border border-slate-200 bg-slate-50"
+                  >
+                    <input
+                      type="text"
+                      required
+                      maxLength={100}
+                      value={newCatName}
+                      onChange={(e) => setNewCatName(e.target.value)}
+                      placeholder="New category name (e.g. Best Presenter)..."
+                      className="w-full min-h-[38px] px-3 py-1.5 text-xs bg-white border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-600"
+                    />
+                    <div className="flex gap-2">
+                      <input
+                        type="text"
+                        maxLength={300}
+                        value={newCatDesc}
+                        onChange={(e) => setNewCatDesc(e.target.value)}
+                        placeholder="Short criteria description (optional)"
+                        className="flex-1 min-h-[38px] px-3 py-1.5 text-xs bg-white border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-600"
                       />
-                      <div className="flex items-center justify-between gap-2">
+                      <button
+                        type="submit"
+                        disabled={savingCat}
+                        className="min-h-[38px] px-3.5 py-1.5 rounded-lg bg-blue-700 hover:bg-blue-800 text-white text-xs font-semibold inline-flex items-center gap-1 whitespace-nowrap shrink-0"
+                      >
+                        <Plus className="w-3.5 h-3.5" />
+                        <span>Add</span>
+                      </button>
+                    </div>
+                  </form>
+
+                  {catError && (
+                    <div className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-800">
+                      {catError}
+                    </div>
+                  )}
+                  {catSavedNote && (
+                    <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-800 font-medium">
+                      {catSavedNote}
+                    </div>
+                  )}
+
+                  <div className="max-h-72 overflow-y-auto divide-y divide-slate-100 border border-slate-200 rounded-xl">
+                    {categories.map((cat) => (
+                      <div
+                        key={cat.id}
+                        className="p-3 bg-white hover:bg-slate-50/70 space-y-2"
+                      >
+                        {editingCat?.id === cat.id ? (
+                          <div className="space-y-2">
+                            <input
+                              type="text"
+                              maxLength={100}
+                              value={editCatName}
+                              onChange={(e) => setEditCatName(e.target.value)}
+                              className="w-full min-h-[34px] px-2.5 py-1 text-xs border border-slate-300 rounded-lg font-semibold"
+                            />
+                            <input
+                              type="text"
+                              maxLength={300}
+                              value={editCatDesc}
+                              onChange={(e) => setEditCatDesc(e.target.value)}
+                              className="w-full min-h-[34px] px-2.5 py-1 text-xs border border-slate-300 rounded-lg"
+                            />
+                            <div className="flex items-center justify-end gap-1.5">
+                              <button
+                                type="button"
+                                onClick={() => setEditingCat(null)}
+                                className="min-h-[30px] px-2.5 py-1 rounded-md border border-slate-300 text-xs font-semibold text-slate-700"
+                              >
+                                Cancel
+                              </button>
+                              <button
+                                type="button"
+                                disabled={savingCat}
+                                onClick={() => void handleSaveEditCategory()}
+                                className="min-h-[30px] px-3 py-1 rounded-md bg-emerald-700 text-white text-xs font-semibold"
+                              >
+                                Save
+                              </button>
+                            </div>
+                          </div>
+                        ) : (
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="min-w-0">
+                              <div className="text-xs font-bold text-slate-900">
+                                {cat.name}
+                              </div>
+                              {cat.description && (
+                                <div className="text-[11px] text-slate-500 mt-0.5 line-clamp-2">
+                                  {cat.description}
+                                </div>
+                              )}
+                            </div>
+                            <div className="flex items-center gap-1 shrink-0">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setEditingCat(cat);
+                                  setEditCatName(cat.name);
+                                  setEditCatDesc(cat.description);
+                                }}
+                                className="min-h-[30px] px-2 py-1 rounded-md border border-slate-200 bg-white hover:bg-slate-100 text-[11px] font-semibold text-slate-700 inline-flex items-center gap-1"
+                              >
+                                <Edit3 className="w-3 h-3" />
+                                <span>Edit</span>
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => void handleDeleteCategory(cat.id)}
+                                className="min-h-[30px] min-w-[30px] rounded-md border border-slate-200 text-rose-700 hover:bg-rose-50 inline-flex items-center justify-center"
+                                aria-label={`Delete ${cat.name}`}
+                              >
+                                <Trash2 className="w-3 h-3" />
+                              </button>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* STUDIO SECTION C: WORDING, LOGO & BOTTOM SIGNATORIES */}
+            {studioSection === 'signatories' && (
+              <div className="space-y-4">
+                <div>
+                  <label
+                    htmlFor="rec-title-input"
+                    className="block text-xs font-semibold text-slate-700 mb-1"
+                  >
+                    Certificate Title
+                  </label>
+                  <input
+                    id="rec-title-input"
+                    type="text"
+                    maxLength={120}
+                    value={draftTemplate.title}
+                    onChange={(e) =>
+                      setDraftTemplate((prev) => ({
+                        ...prev,
+                        title: e.target.value,
+                      }))
+                    }
+                    className="w-full min-h-[40px] px-3 py-1.5 text-sm border border-slate-300 rounded-xl"
+                  />
+                </div>
+
+                <div>
+                  <label
+                    htmlFor="rec-subtitle-input"
+                    className="block text-xs font-semibold text-slate-700 mb-1"
+                  >
+                    Subtitle
+                  </label>
+                  <input
+                    id="rec-subtitle-input"
+                    type="text"
+                    maxLength={140}
+                    value={draftTemplate.subtitle}
+                    onChange={(e) =>
+                      setDraftTemplate((prev) => ({
+                        ...prev,
+                        subtitle: e.target.value,
+                      }))
+                    }
+                    className="w-full min-h-[40px] px-3 py-1.5 text-xs border border-slate-300 rounded-xl"
+                  />
+                </div>
+
+                <div>
+                  <label
+                    htmlFor="rec-wording-input"
+                    className="block text-xs font-semibold text-slate-700 mb-1"
+                  >
+                    Wording Template
+                  </label>
+                  <textarea
+                    id="rec-wording-input"
+                    rows={3}
+                    maxLength={600}
+                    value={draftTemplate.wordingTemplate}
+                    onChange={(e) =>
+                      setDraftTemplate((prev) => ({
+                        ...prev,
+                        wordingTemplate: e.target.value,
+                      }))
+                    }
+                    className="w-full px-3 py-2 text-xs border border-slate-300 rounded-xl"
+                  />
+                  <div className="mt-1.5 flex flex-wrap gap-1">
+                    {PLACEHOLDER_TOKENS.map((tok) => (
+                      <button
+                        key={tok}
+                        type="button"
+                        onClick={() =>
+                          setDraftTemplate((prev) => ({
+                            ...prev,
+                            wordingTemplate: `${prev.wordingTemplate} ${tok}`.slice(
+                              0,
+                              600
+                            ),
+                          }))
+                        }
+                        className="text-[10px] font-mono-tabular px-1.5 py-0.5 rounded bg-slate-100 hover:bg-slate-200 text-slate-700"
+                      >
+                        +{tok}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Institution Logo & Bottom Signatories */}
+                <div className="pt-3 border-t border-slate-200 space-y-4">
+                  <input
+                    ref={logoUploadRef}
+                    type="file"
+                    accept="image/png,image/jpeg,image/webp,.png,.jpg,.jpeg,.webp"
+                    onChange={(e) => {
+                      const file = e.target.files?.[0];
+                      e.target.value = '';
+                      if (file) void handleUploadCustomLogo(file);
+                    }}
+                    className="hidden"
+                  />
+                  <input
+                    ref={picPdSigUploadRef}
+                    type="file"
+                    accept="image/png,image/jpeg,image/webp,.png,.jpg,.jpeg,.webp"
+                    onChange={(e) => {
+                      const file = e.target.files?.[0];
+                      e.target.value = '';
+                      if (file) void handleUploadSignature('picPd', file);
+                    }}
+                    className="hidden"
+                    aria-label="Upload PIC of Professional Development signature"
+                  />
+                  <input
+                    ref={principalSigUploadRef}
+                    type="file"
+                    accept="image/png,image/jpeg,image/webp,.png,.jpg,.jpeg,.webp"
+                    onChange={(e) => {
+                      const file = e.target.files?.[0];
+                      e.target.value = '';
+                      if (file) void handleUploadSignature('principal', file);
+                    }}
+                    className="hidden"
+                    aria-label="Upload Principal signature"
+                  />
+
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="text-xs font-semibold text-slate-700">
+                      Institution Logo
+                    </span>
+                    <div className="flex items-center gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => logoUploadRef.current?.click()}
+                        className="min-h-[34px] px-3 py-1 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 text-xs font-semibold text-slate-700 inline-flex items-center gap-1"
+                      >
+                        <ImagePlus className="w-3.5 h-3.5 text-blue-700" />
+                        <span>
+                          {draftTemplate.customLogoDataUrl
+                            ? 'Change Logo'
+                            : 'Upload Custom Logo'}
+                        </span>
+                      </button>
+                      {draftTemplate.customLogoDataUrl && (
                         <button
                           type="button"
-                          onClick={() => setDrawingRole(null)}
-                          className="text-[11px] font-semibold text-slate-500 hover:text-slate-900"
+                          onClick={() =>
+                            setDraftTemplate((prev) => ({
+                              ...prev,
+                              customLogoDataUrl: '',
+                            }))
+                          }
+                          className="min-h-[34px] px-2.5 py-1 rounded-lg border border-rose-200 bg-rose-50 text-xs font-semibold text-rose-700"
                         >
-                          Cancel
+                          Use Default
                         </button>
+                      )}
+                    </div>
+                  </div>
+
+                  <div>
+                    <div className="text-xs font-bold text-slate-900">
+                      Bottom Signatories (Native Template)
+                    </div>
+                    <p className="text-[11px] text-slate-500 mt-0.5">
+                      Customize names, role titles, and signatures for PIC of Professional Development and Principal.
+                    </p>
+                  </div>
+
+                  {(
+                    [
+                      {
+                        role: 'picPd' as const,
+                        heading: '1. PIC of Professional Development',
+                        nameValue: draftTemplate.picPdName,
+                        namePlaceholder: 'e.g., Ms. Elena Vance, M.Ed.',
+                        titleValue: draftTemplate.picPdTitle,
+                        defaultTitle: 'PIC of Professional Development',
+                        signatureUrl: draftTemplate.picPdSignatureDataUrl,
+                        uploadRef: picPdSigUploadRef,
+                        onNameChange: (val: string) =>
+                          setDraftTemplate((prev) => ({ ...prev, picPdName: val })),
+                        onTitleChange: (val: string) =>
+                          setDraftTemplate((prev) => ({
+                            ...prev,
+                            picPdTitle: val,
+                            signatoryLabel: val,
+                          })),
+                        onClearSig: () =>
+                          setDraftTemplate((prev) => ({
+                            ...prev,
+                            picPdSignatureDataUrl: '',
+                            signatureDataUrl: '',
+                          })),
+                      },
+                      {
+                        role: 'principal' as const,
+                        heading: '2. Principal',
+                        nameValue: draftTemplate.principalName,
+                        namePlaceholder: 'e.g., Dr. Ahmad Fauzi',
+                        titleValue: draftTemplate.principalTitle,
+                        defaultTitle: 'Principal',
+                        signatureUrl: draftTemplate.principalSignatureDataUrl,
+                        uploadRef: principalSigUploadRef,
+                        onNameChange: (val: string) =>
+                          setDraftTemplate((prev) => ({
+                            ...prev,
+                            principalName: val,
+                          })),
+                        onTitleChange: (val: string) =>
+                          setDraftTemplate((prev) => ({
+                            ...prev,
+                            principalTitle: val,
+                          })),
+                        onClearSig: () =>
+                          setDraftTemplate((prev) => ({
+                            ...prev,
+                            principalSignatureDataUrl: '',
+                          })),
+                      },
+                    ] as const
+                  ).map((sig) => (
+                    <div
+                      key={sig.role}
+                      className="rounded-xl border border-slate-200 bg-slate-50/70 p-3.5 space-y-2.5"
+                    >
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <span className="text-xs font-bold text-slate-800">
+                          {sig.heading}
+                        </span>
                         <div className="flex items-center gap-1.5">
                           <button
                             type="button"
-                            onClick={handleClearDrawCanvas}
-                            className="px-2.5 py-1 rounded-md border border-slate-300 bg-white text-[11px] font-semibold text-slate-700"
+                            onClick={() => sig.uploadRef.current?.click()}
+                            className="min-h-[32px] px-2.5 py-1 rounded-lg border border-slate-300 bg-white hover:bg-slate-100 text-[11px] font-semibold text-slate-700 inline-flex items-center gap-1"
                           >
-                            Clear Pad
+                            <ImagePlus className="w-3.5 h-3.5 text-blue-700" />
+                            <span>Upload</span>
                           </button>
                           <button
                             type="button"
-                            onClick={handleApplyDrawnSignature}
-                            className="px-3 py-1 rounded-md bg-blue-700 text-white text-[11px] font-semibold"
+                            onClick={() => {
+                              setDrawingRole((prev) =>
+                                prev === sig.role ? null : sig.role
+                              );
+                              window.setTimeout(() => handleClearDrawCanvas(), 0);
+                            }}
+                            className="min-h-[32px] px-2.5 py-1 rounded-lg border border-slate-300 bg-white hover:bg-slate-100 text-[11px] font-semibold text-slate-700 inline-flex items-center gap-1"
                           >
-                            Use Signature
+                            <PenTool className="w-3.5 h-3.5 text-blue-700" />
+                            <span>Draw</span>
                           </button>
+                          {sig.signatureUrl && (
+                            <button
+                              type="button"
+                              onClick={sig.onClearSig}
+                              className="min-h-[32px] px-2 py-1 rounded-lg border border-rose-200 bg-rose-50 text-[11px] font-semibold text-rose-700"
+                            >
+                              Clear
+                            </button>
+                          )}
+                        </div>
+                      </div>
+
+                      {sig.signatureUrl && (
+                        <div className="h-14 rounded-lg border border-dashed border-slate-300 bg-white flex items-center justify-center p-1.5 overflow-hidden">
+                          <img
+                            src={sig.signatureUrl}
+                            alt={`${sig.heading} signature preview`}
+                            className="max-h-full max-w-full object-contain"
+                          />
+                        </div>
+                      )}
+
+                      {drawingRole === sig.role && (
+                        <div className="rounded-lg border border-blue-200 bg-white p-2.5 space-y-2">
+                          <canvas
+                            ref={drawCanvasRef}
+                            width={360}
+                            height={110}
+                            onPointerDown={handleStartDraw}
+                            onPointerMove={handleMoveDraw}
+                            onPointerUp={handleEndDraw}
+                            onPointerLeave={handleEndDraw}
+                            className="w-full h-24 bg-slate-50 border border-slate-300 rounded-md touch-none cursor-crosshair"
+                          />
+                          <div className="flex items-center justify-between gap-2">
+                            <button
+                              type="button"
+                              onClick={() => setDrawingRole(null)}
+                              className="text-[11px] font-semibold text-slate-500 hover:text-slate-900"
+                            >
+                              Cancel
+                            </button>
+                            <div className="flex items-center gap-1.5">
+                              <button
+                                type="button"
+                                onClick={handleClearDrawCanvas}
+                                className="px-2.5 py-1 rounded-md border border-slate-300 bg-white text-[11px] font-semibold text-slate-700"
+                              >
+                                Clear Pad
+                              </button>
+                              <button
+                                type="button"
+                                onClick={handleApplyDrawnSignature}
+                                className="px-3 py-1 rounded-md bg-blue-700 text-white text-[11px] font-semibold"
+                              >
+                                Use Signature
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                      )}
+
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                        <div>
+                          <label
+                            htmlFor={`rec-sig-name-${sig.role}`}
+                            className="block text-[11px] font-semibold text-slate-600 mb-0.5"
+                          >
+                            Custom Name
+                          </label>
+                          <input
+                            id={`rec-sig-name-${sig.role}`}
+                            type="text"
+                            maxLength={120}
+                            value={sig.nameValue}
+                            onChange={(e) => sig.onNameChange(e.target.value)}
+                            placeholder={sig.namePlaceholder}
+                            className="w-full min-h-[36px] px-2.5 py-1 text-xs bg-white border border-slate-300 rounded-lg"
+                          />
+                        </div>
+                        <div>
+                          <label
+                            htmlFor={`rec-sig-title-${sig.role}`}
+                            className="block text-[11px] font-semibold text-slate-600 mb-0.5"
+                          >
+                            Role Title
+                          </label>
+                          <input
+                            id={`rec-sig-title-${sig.role}`}
+                            type="text"
+                            maxLength={120}
+                            value={sig.titleValue}
+                            onChange={(e) => sig.onTitleChange(e.target.value)}
+                            placeholder={sig.defaultTitle}
+                            className="w-full min-h-[36px] px-2.5 py-1 text-xs bg-white border border-slate-300 rounded-lg"
+                          />
                         </div>
                       </div>
                     </div>
-                  )}
-
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                    <div>
-                      <label
-                        htmlFor={`rec-sig-name-${sig.role}`}
-                        className="block text-[11px] font-semibold text-slate-600 mb-0.5"
-                      >
-                        Custom Name
-                      </label>
-                      <input
-                        id={`rec-sig-name-${sig.role}`}
-                        type="text"
-                        maxLength={120}
-                        value={sig.nameValue}
-                        onChange={(e) => sig.onNameChange(e.target.value)}
-                        placeholder={sig.namePlaceholder}
-                        className="w-full min-h-[36px] px-2.5 py-1 text-xs bg-white border border-slate-300 rounded-lg"
-                      />
-                    </div>
-                    <div>
-                      <label
-                        htmlFor={`rec-sig-title-${sig.role}`}
-                        className="block text-[11px] font-semibold text-slate-600 mb-0.5"
-                      >
-                        Role Title
-                      </label>
-                      <input
-                        id={`rec-sig-title-${sig.role}`}
-                        type="text"
-                        maxLength={120}
-                        value={sig.titleValue}
-                        onChange={(e) => sig.onTitleChange(e.target.value)}
-                        placeholder={sig.defaultTitle}
-                        className="w-full min-h-[36px] px-2.5 py-1 text-xs bg-white border border-slate-300 rounded-lg"
-                      />
-                    </div>
-                  </div>
+                  ))}
                 </div>
-              ))}
-
-              {/* Field Visibility Toggles */}
-              <div className="flex flex-wrap gap-3 pt-1 text-xs font-medium text-slate-700">
-                <label className="inline-flex items-center gap-1.5">
-                  <input
-                    type="checkbox"
-                    checked={draftTemplate.showTopic}
-                    onChange={(e) =>
-                      setDraftTemplate((prev) => ({
-                        ...prev,
-                        showTopic: e.target.checked,
-                      }))
-                    }
-                  />
-                  <span>Show Topic/Theme</span>
-                </label>
-                <label className="inline-flex items-center gap-1.5">
-                  <input
-                    type="checkbox"
-                    checked={draftTemplate.showCertificateId}
-                    onChange={(e) =>
-                      setDraftTemplate((prev) => ({
-                        ...prev,
-                        showCertificateId: e.target.checked,
-                      }))
-                    }
-                  />
-                  <span>Show Certificate ID</span>
-                </label>
               </div>
-            </div>
+            )}
 
             {templateError && (
               <div className="rounded-xl border border-rose-200 bg-rose-50 px-3.5 py-2.5 text-xs text-rose-800">
                 {templateError}
+              </div>
+            )}
+
+            {templateSaved && (
+              <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-3.5 py-2.5 text-xs text-emerald-800 font-medium">
+                Saved and synchronized with all event certificate recaps and PDF exports.
               </div>
             )}
 
@@ -2049,548 +2992,245 @@ export default function AdminRecognitionModule({
                 <Save className="w-4 h-4" />
               )}
               <span>
-                {templateSaved ? 'Template Saved!' : 'Save Certificate Template'}
+                {templateSaved
+                  ? 'Studio Saved & Synced!'
+                  : 'Save & Sync Certificate Studio'}
               </span>
             </button>
           </section>
 
-          {/* Live Certificate Preview Column */}
-          <section className="lg:col-span-7 bg-slate-100 border border-slate-200 rounded-2xl p-4 sm:p-6 flex flex-col items-center justify-center">
-            <div className="w-full flex items-center justify-between mb-3 text-xs text-slate-600">
+          {/* Live Synchronized Certificate Preview Column */}
+          <section className="lg:col-span-7 bg-slate-100 border border-slate-200 rounded-2xl p-4 sm:p-6 space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-slate-600">
               <span className="font-bold uppercase tracking-wider">
                 Live Certificate Preview ({draftTemplate.orientation})
               </span>
               <span className="font-mono-tabular">
-                A4 {draftTemplate.orientation === 'portrait' ? '210 × 297 mm' : '297 × 210 mm'}
+                A4{' '}
+                {draftTemplate.orientation === 'portrait'
+                  ? '210 × 297 mm'
+                  : '297 × 210 mm'}
               </span>
             </div>
 
-            <div
-              className={`w-full shadow-lg rounded-sm relative overflow-hidden flex flex-col justify-between p-6 sm:p-8 text-center transition-all ${
-                draftTemplate.orientation === 'portrait'
-                  ? 'max-w-[440px] aspect-[210/297]'
-                  : 'max-w-[680px] aspect-[297/210]'
-              }`}
-              style={{
-                backgroundColor: draftTemplate.paperColor,
-                border: `4px solid ${draftTemplate.primaryColor}`,
-                fontFamily:
-                  draftTemplate.fontFamily === 'times'
-                    ? 'Georgia, "Times New Roman", serif'
-                    : draftTemplate.fontFamily === 'courier'
-                    ? 'ui-monospace, monospace'
-                    : 'system-ui, sans-serif',
-              }}
-            >
-              {/* Inner accent border */}
-              <div
-                className="absolute inset-2 pointer-events-none"
-                style={{ border: `1.5px solid ${draftTemplate.accentColor}` }}
-              />
-
-              <div className="relative z-10 flex flex-col items-center space-y-2 pt-2">
-                {previewLogoUrl && (
-                  <img
-                    src={previewLogoUrl}
-                    alt="Organization logo"
-                    className="h-10 w-10 object-contain"
-                  />
-                )}
-                <div
-                  className="text-[10px] font-bold tracking-widest uppercase"
-                  style={{ color: draftTemplate.accentColor }}
+            {/* Preview Event & Category Switcher so admin verifies alignment per event */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 bg-white/80 p-3 rounded-xl border border-slate-200">
+              <div>
+                <label
+                  htmlFor="studio-preview-event"
+                  className="block text-[11px] font-semibold text-slate-600 mb-1"
                 >
-                  {branding?.organizationName?.trim() || 'PRESENZA'}
-                </div>
-                <h4
-                  className="text-xl sm:text-2xl font-bold tracking-tight leading-tight"
-                  style={{ color: draftTemplate.primaryColor }}
+                  Preview Event Context
+                </label>
+                <select
+                  id="studio-preview-event"
+                  value={selectedEventId}
+                  onChange={(e) => setSelectedEventId(e.target.value)}
+                  className="w-full min-h-[36px] px-2.5 py-1 text-xs bg-white border border-slate-300 rounded-lg font-medium text-slate-900"
                 >
-                  {draftTemplate.title}
-                </h4>
-                {draftTemplate.subtitle && (
-                  <p className="text-[10px] uppercase tracking-wider text-slate-500">
-                    {draftTemplate.subtitle}
-                  </p>
-                )}
-
-                <div
-                  className="mt-1 px-4 py-1 rounded text-[11px] font-bold uppercase tracking-wider bg-slate-50 border"
-                  style={{
-                    color: draftTemplate.accentColor,
-                    borderColor: draftTemplate.accentColor,
-                  }}
-                >
-                  {previewRibbonText}
-                </div>
+                  {events.length === 0 && (
+                    <option value="">Sample Workshop Event</option>
+                  )}
+                  {events.map((ev) => (
+                    <option key={ev.id} value={ev.id}>
+                      {ev.title}
+                    </option>
+                  ))}
+                </select>
               </div>
-
-              <div className="relative z-10 my-auto py-3 space-y-2">
-                <p className="text-[11px] text-slate-500">
-                  This recognition award is proudly presented to
-                </p>
-                <div
-                  className="text-2xl sm:text-3xl font-bold"
-                  style={{ color: draftTemplate.primaryColor }}
+              <div>
+                <label
+                  htmlFor="studio-preview-category"
+                  className="block text-[11px] font-semibold text-slate-600 mb-1"
                 >
-                  {eventParticipants[0]?.record.fullName || 'Dr. Sarah Jenkins'}
-                </div>
-                <div
-                  className="text-xs font-bold"
-                  style={{ color: draftTemplate.accentColor }}
+                  Preview Recognition Category
+                </label>
+                <select
+                  id="studio-preview-category"
+                  value={selectedCategoryId}
+                  onChange={(e) => setSelectedCategoryId(e.target.value)}
+                  className="w-full min-h-[36px] px-2.5 py-1 text-xs bg-white border border-slate-300 rounded-lg font-medium text-slate-900"
                 >
-                  {eventParticipants[0]?.record.classDepartment ||
-                    'Curriculum Department'}
-                </div>
-                <div className="w-40 h-px bg-slate-300 mx-auto" />
-                <p className="text-xs text-slate-700 leading-relaxed max-w-lg mx-auto">
-                  {previewSampleWording}
-                </p>
-                {draftTemplate.showTopic && (
-                  <div
-                    className="text-[11px] font-bold pt-1"
-                    style={{ color: draftTemplate.primaryColor }}
-                  >
-                    Topic:{' '}
-                    {selectedEvent?.topic?.trim() ||
-                      selectedEvent?.category ||
-                      'Instructional Excellence'}
-                  </div>
-                )}
-              </div>
-
-              <div className="relative z-10 space-y-2.5 pb-1">
-                <div className="grid grid-cols-2 gap-8 sm:gap-12 items-end text-[10px] max-w-lg mx-auto">
-                  <div className="flex flex-col items-center">
-                    {draftTemplate.picPdSignatureDataUrl && (
-                      <img
-                        src={draftTemplate.picPdSignatureDataUrl}
-                        alt="PIC of Professional Development signature"
-                        className="h-8 object-contain mb-1"
-                      />
-                    )}
-                    {draftTemplate.picPdName.trim() && (
-                      <div
-                        className="font-bold pb-0.5 truncate max-w-full"
-                        style={{ color: draftTemplate.primaryColor }}
-                      >
-                        {draftTemplate.picPdName.trim()}
-                      </div>
-                    )}
-                    <div className="w-full border-t border-slate-300 pt-1 text-slate-600 font-medium truncate">
-                      {draftTemplate.picPdTitle.trim() ||
-                        'PIC of Professional Development'}
-                    </div>
-                  </div>
-
-                  <div className="flex flex-col items-center">
-                    {draftTemplate.principalSignatureDataUrl && (
-                      <img
-                        src={draftTemplate.principalSignatureDataUrl}
-                        alt="Principal signature"
-                        className="h-8 object-contain mb-1"
-                      />
-                    )}
-                    {draftTemplate.principalName.trim() && (
-                      <div
-                        className="font-bold pb-0.5 truncate max-w-full"
-                        style={{ color: draftTemplate.primaryColor }}
-                      >
-                        {draftTemplate.principalName.trim()}
-                      </div>
-                    )}
-                    <div className="w-full border-t border-slate-300 pt-1 text-slate-600 font-medium truncate">
-                      {draftTemplate.principalTitle.trim() || 'Principal'}
-                    </div>
-                  </div>
-                </div>
-
-                {draftTemplate.showCertificateId && (
-                  <div className="font-mono-tabular text-[9px] text-slate-400">
-                    Certificate ID: PRZ-2026-SAMPLE · Issued:{' '}
-                    {formatLocalDateYmd(new Date())} · Event:{' '}
-                    {selectedEvent?.title || 'Workshop Session'}
-                  </div>
-                )}
+                  {categories.map((cat) => (
+                    <option key={cat.id} value={cat.id}>
+                      {cat.name}
+                    </option>
+                  ))}
+                </select>
               </div>
             </div>
+
+            <RecognitionCertificateCanvas
+              template={draftTemplate}
+              backgroundDataUrl={draftBgDataUrl}
+              backgroundOpacity={draftBgOpacity}
+              logoUrl={previewLogoUrl}
+              organizerName={branding?.organizationName?.trim() || 'PRESENZA'}
+              ribbonText={previewRibbonText}
+              recipientName={
+                eventParticipants[0]?.record.fullName || 'Dr. Sarah Jenkins'
+              }
+              recipientDepartment={
+                eventParticipants[0]?.record.classDepartment ||
+                'Curriculum Department'
+              }
+              wordingText={previewSampleWording}
+              topicText={
+                selectedEvent?.topic?.trim() ||
+                selectedEvent?.category ||
+                'Instructional Excellence'
+              }
+              themeText={selectedEvent?.theme?.trim() || ''}
+              certificateNumber="PRZ-2026-SAMPLE"
+              issueDate={formatLocalDateYmd(new Date())}
+              eventTitle={selectedEvent?.title || 'Workshop Session'}
+            />
           </section>
         </div>
       )}
 
-      {/* TAB 3: RECOGNITION CATEGORIES CRUD */}
-      {subTab === 'categories' && (
-        <div className="bg-white border border-slate-200 rounded-2xl p-6 space-y-6">
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 border-b border-slate-200">
-            <div>
-              <h3 className="text-base font-bold text-slate-900">
-                Manage Recognition Categories
-              </h3>
-              <p className="text-xs text-slate-500 mt-0.5">
-                Add, rename, edit descriptions, or delete recognition award titles used for certificates.
-              </p>
-            </div>
-            <button
-              type="button"
-              disabled={seedingCategories}
-              onClick={() => void seedDefaultCategories()}
-              className="min-h-[38px] px-3.5 py-1.5 rounded-xl border border-slate-300 bg-white hover:bg-slate-50 text-xs font-semibold text-slate-800 inline-flex items-center gap-1.5 self-start sm:self-auto"
-            >
-              {seedingCategories ? (
-                <Loader2 className="w-3.5 h-3.5 animate-spin" />
-              ) : (
-                <Sparkles className="w-3.5 h-3.5 text-amber-600" />
-              )}
-              <span>Restore Default &amp; Term 1–4 Categories</span>
-            </button>
-          </div>
-
-          <form
-            onSubmit={handleAddCategory}
-            className="grid grid-cols-1 sm:grid-cols-12 gap-3 p-4 rounded-xl border border-slate-200 bg-slate-50"
+      {/* Live-Synced Issued Certificate Preview Modal */}
+      {previewCert && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/70 backdrop-blur-sm p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="recap-cert-preview-title"
+          onClick={() => setPreviewCert(null)}
+        >
+          <div
+            className="w-full max-w-4xl max-h-[92vh] rounded-2xl bg-slate-100 border border-slate-200 shadow-2xl overflow-hidden flex flex-col"
+            onClick={(e) => e.stopPropagation()}
           >
-            <input
-              type="text"
-              required
-              maxLength={100}
-              value={newCatName}
-              onChange={(e) => setNewCatName(e.target.value)}
-              placeholder="New recognition category name..."
-              className="sm:col-span-4 min-h-[42px] px-3.5 py-2 text-sm bg-white border border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-600"
-            />
-            <input
-              type="text"
-              maxLength={300}
-              value={newCatDesc}
-              onChange={(e) => setNewCatDesc(e.target.value)}
-              placeholder="Short criteria description (optional)"
-              className="sm:col-span-6 min-h-[42px] px-3.5 py-2 text-sm bg-white border border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-600"
-            />
-            <button
-              type="submit"
-              disabled={savingCat}
-              className="sm:col-span-2 min-h-[42px] px-4 py-2 rounded-xl bg-blue-700 hover:bg-blue-800 text-white text-xs font-semibold inline-flex items-center justify-center gap-1.5"
-            >
-              <Plus className="w-4 h-4" />
-              <span>Add</span>
-            </button>
-          </form>
-
-          {catError && (
-            <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-2.5 text-xs text-rose-800">
-              {catError}
-            </div>
-          )}
-
-          <div className="divide-y divide-slate-100 border border-slate-200 rounded-xl overflow-hidden">
-            {categories.map((cat) => (
-              <div
-                key={cat.id}
-                className="p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-white hover:bg-slate-50/60"
-              >
-                {editingCat?.id === cat.id ? (
-                  <div className="flex-1 flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
-                    <input
-                      type="text"
-                      maxLength={100}
-                      value={editCatName}
-                      onChange={(e) => setEditCatName(e.target.value)}
-                      className="min-h-[38px] px-3 py-1.5 text-sm border border-slate-300 rounded-lg font-semibold"
-                    />
-                    <input
-                      type="text"
-                      maxLength={300}
-                      value={editCatDesc}
-                      onChange={(e) => setEditCatDesc(e.target.value)}
-                      className="flex-1 min-h-[38px] px-3 py-1.5 text-xs border border-slate-300 rounded-lg"
-                    />
-                    <div className="flex items-center gap-1.5">
-                      <button
-                        type="button"
-                        disabled={savingCat}
-                        onClick={() => void handleSaveEditCategory()}
-                        className="min-h-[36px] px-3 py-1 rounded-lg bg-emerald-700 text-white text-xs font-semibold"
-                      >
-                        Save
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setEditingCat(null)}
-                        className="min-h-[36px] px-2.5 py-1 rounded-lg border border-slate-300 text-xs font-semibold text-slate-700"
-                      >
-                        <X className="w-4 h-4" />
-                      </button>
-                    </div>
-                  </div>
-                ) : (
-                  <>
-                    <div className="min-w-0">
-                      <div className="text-sm font-bold text-slate-900">
-                        {cat.name}
-                      </div>
-                      {cat.description && (
-                        <div className="text-xs text-slate-500 mt-0.5">
-                          {cat.description}
-                        </div>
-                      )}
-                    </div>
-
-                    <div className="flex items-center gap-1.5 shrink-0">
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setEditingCat(cat);
-                          setEditCatName(cat.name);
-                          setEditCatDesc(cat.description);
-                        }}
-                        className="min-h-[36px] px-2.5 py-1 rounded-lg border border-slate-300 bg-white hover:bg-slate-100 text-xs font-semibold text-slate-700 inline-flex items-center gap-1"
-                      >
-                        <Edit3 className="w-3.5 h-3.5" />
-                        <span>Rename / Edit</span>
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => void handleDeleteCategory(cat.id)}
-                        className="min-h-[36px] min-w-[36px] rounded-lg border border-slate-200 text-rose-700 hover:bg-rose-50 inline-flex items-center justify-center"
-                        aria-label={`Delete ${cat.name}`}
-                      >
-                        <Trash2 className="w-3.5 h-3.5" />
-                      </button>
-                    </div>
-                  </>
-                )}
+            <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-3.5 bg-white border-b border-slate-200 shrink-0">
+              <div className="min-w-0">
+                <h3
+                  id="recap-cert-preview-title"
+                  className="text-sm sm:text-base font-bold text-slate-900 truncate"
+                >
+                  {previewCert.participantName} —{' '}
+                  {categoriesById.get(previewCert.categoryId)?.name ||
+                    previewCert.categoryName}
+                </h3>
+                <p className="text-xs text-slate-500 font-mono-tabular">
+                  {previewCert.certificateNumber} · Synced with Certificate Studio
+                </p>
               </div>
-            ))}
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() =>
+                    downloadRecognitionCertificatesPdf(
+                      [previewCert],
+                      templateConfig,
+                      branding,
+                      undefined,
+                      pdfBatchOptions
+                    )
+                  }
+                  className="min-h-[36px] px-3 py-1.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold inline-flex items-center gap-1.5"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  <span>Download PDF</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() =>
+                    printRecognitionCertificatesPdf(
+                      [previewCert],
+                      templateConfig,
+                      branding,
+                      pdfBatchOptions
+                    )
+                  }
+                  className="min-h-[36px] px-3 py-1.5 rounded-xl border border-slate-300 bg-white hover:bg-slate-100 text-slate-800 text-xs font-semibold inline-flex items-center gap-1.5"
+                >
+                  <Printer className="w-3.5 h-3.5" />
+                  <span>Print</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setPreviewCert(null)}
+                  className="min-h-[36px] min-w-[36px] rounded-lg text-slate-500 hover:text-slate-900 hover:bg-slate-100 inline-flex items-center justify-center"
+                  aria-label="Close certificate preview"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+            </div>
+
+            <div className="p-5 sm:p-8 overflow-y-auto">
+              {(() => {
+                const liveEvent = eventsById.get(previewCert.eventId);
+                const liveCategoryName =
+                  categoriesById.get(previewCert.categoryId)?.name?.trim() ||
+                  previewCert.categoryName;
+                const ribbon =
+                  activeStudioTermLabel &&
+                  activeStudioTermLabel.toLowerCase() !==
+                    liveCategoryName.toLowerCase()
+                    ? `${activeStudioTermLabel} · ${liveCategoryName}`
+                    : liveCategoryName;
+                const resolvedOrganizer =
+                  branding?.organizationName?.trim() ||
+                  previewCert.organizerName ||
+                  'PRESENZA';
+                const resolvedEventTitle =
+                  liveEvent?.title?.trim() || previewCert.eventTitle;
+                const resolvedEventDate =
+                  liveEvent?.eventDate?.trim() || previewCert.eventDate;
+                const resolvedEventVenue =
+                  liveEvent?.venue?.trim() || previewCert.eventVenue;
+                const resolvedEventTopic =
+                  liveEvent?.topic?.trim() ||
+                  liveEvent?.category?.trim() ||
+                  previewCert.eventTopic;
+                const resolvedEventTheme =
+                  liveEvent?.theme?.trim() || previewCert.eventTheme;
+                const resolvedWording = interpolateRecognitionWording(
+                  templateConfig.wordingTemplate,
+                  {
+                    participant: previewCert.participantName,
+                    category: liveCategoryName,
+                    event: resolvedEventTitle,
+                    date: resolvedEventDate,
+                    venue: resolvedEventVenue,
+                    topic: resolvedEventTopic,
+                    theme: resolvedEventTheme,
+                    facilitator:
+                      templateConfig.picPdName.trim() ||
+                      liveEvent?.facilitators ||
+                      previewCert.facilitators,
+                    organizer: resolvedOrganizer,
+                    department: previewCert.participantDepartment,
+                  }
+                );
+
+                return (
+                  <RecognitionCertificateCanvas
+                    template={templateConfig}
+                    backgroundDataUrl={certificateSettings.backgroundDataUrl}
+                    backgroundOpacity={certificateSettings.backgroundOpacity}
+                    logoUrl={
+                      templateConfig.customLogoDataUrl ||
+                      branding?.logoDataUrl ||
+                      ''
+                    }
+                    organizerName={resolvedOrganizer}
+                    ribbonText={ribbon}
+                    recipientName={previewCert.participantName}
+                    recipientDepartment={previewCert.participantDepartment}
+                    wordingText={resolvedWording}
+                    topicText={resolvedEventTopic}
+                    themeText={resolvedEventTheme}
+                    certificateNumber={previewCert.certificateNumber}
+                    issueDate={previewCert.issueDate}
+                    eventTitle={resolvedEventTitle}
+                  />
+                );
+              })()}
+            </div>
           </div>
-        </div>
-      )}
-
-      {/* TAB 4: ISSUED CERTIFICATE HISTORY & BULK PDF */}
-      {subTab === 'history' && (
-        <div className="bg-white border border-slate-200 rounded-2xl overflow-hidden">
-          <div className="p-5 sm:p-6 border-b border-slate-200 flex flex-col lg:flex-row lg:items-center justify-between gap-4">
-            <div>
-              <h3 className="text-base font-bold text-slate-900">
-                Issued Recognition Certificate History ({filteredCertificates.length})
-              </h3>
-              <p className="text-xs text-slate-500 mt-0.5">
-                Search by participant, event, category, or Certificate ID. Download single or bulk multi-page PDFs or print directly.
-              </p>
-            </div>
-
-            <div className="flex flex-wrap items-center gap-2">
-              <button
-                type="button"
-                disabled={selectedBulkCerts.length === 0}
-                onClick={() =>
-                  downloadRecognitionCertificatesPdf(
-                    selectedBulkCerts,
-                    templateConfig,
-                    branding
-                  )
-                }
-                className="min-h-[40px] px-3.5 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold inline-flex items-center gap-1.5 disabled:opacity-50"
-              >
-                <Download className="w-3.5 h-3.5" />
-                <span>
-                  {selectedCertIds.size > 0
-                    ? `Download Selected (${selectedCertIds.size}) PDF`
-                    : `Download All Filtered (${filteredCertificates.length}) PDF`}
-                </span>
-              </button>
-              <button
-                type="button"
-                disabled={selectedBulkCerts.length === 0}
-                onClick={() =>
-                  printRecognitionCertificatesPdf(
-                    selectedBulkCerts,
-                    templateConfig,
-                    branding
-                  )
-                }
-                className="min-h-[40px] px-3.5 py-2 rounded-xl border border-slate-300 bg-white hover:bg-slate-100 text-slate-800 text-xs font-semibold inline-flex items-center gap-1.5 disabled:opacity-50"
-              >
-                <Printer className="w-3.5 h-3.5" />
-                <span>Print</span>
-              </button>
-            </div>
-          </div>
-
-          {/* Search & Filters */}
-          <div className="px-5 py-3.5 bg-slate-50 border-b border-slate-200 grid grid-cols-1 sm:grid-cols-3 gap-2.5">
-            <div className="relative">
-              <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
-              <input
-                type="search"
-                value={historySearch}
-                onChange={(e) => setHistorySearch(e.target.value)}
-                placeholder="Search recipient, category, or ID..."
-                className="w-full min-h-[38px] pl-9 pr-3 py-1.5 text-xs bg-white border border-slate-300 rounded-xl"
-              />
-            </div>
-
-            <select
-              value={historyEventFilter}
-              onChange={(e) => setHistoryEventFilter(e.target.value)}
-              aria-label="Filter certificates by event"
-              className="min-h-[38px] px-3 py-1.5 text-xs bg-white border border-slate-300 rounded-xl text-slate-800"
-            >
-              <option value="all">All Events</option>
-              {events.map((ev) => (
-                <option key={ev.id} value={ev.id}>
-                  {ev.title}
-                </option>
-              ))}
-            </select>
-
-            <select
-              value={historyCategoryFilter}
-              onChange={(e) => setHistoryCategoryFilter(e.target.value)}
-              aria-label="Filter certificates by category"
-              className="min-h-[38px] px-3 py-1.5 text-xs bg-white border border-slate-300 rounded-xl text-slate-800"
-            >
-              <option value="all">All Recognition Categories</option>
-              {categories.map((cat) => (
-                <option key={cat.id} value={cat.id}>
-                  {cat.name}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          {filteredCertificates.length === 0 ? (
-            <div className="p-10 text-center space-y-2">
-              <Award className="w-8 h-8 text-slate-300 mx-auto" />
-              <p className="text-sm font-semibold text-slate-900">
-                No certificates match the current search
-              </p>
-              <p className="text-xs text-slate-500">
-                Switch to &ldquo;Award &amp; Issue&rdquo; to select recipients and generate recognition certificates.
-              </p>
-            </div>
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full text-left border-collapse text-sm">
-                <thead>
-                  <tr className="border-b border-slate-200 bg-slate-50 text-xs font-semibold text-slate-600">
-                    <th className="py-3 px-4 w-10">Pick</th>
-                    <th className="py-3 px-4">Certificate ID</th>
-                    <th className="py-3 px-4">Recipient</th>
-                    <th className="py-3 px-4">Category</th>
-                    <th className="py-3 px-4">Event &amp; Topic</th>
-                    <th className="py-3 px-4">Issued Date</th>
-                    <th className="py-3 px-4 text-right">Actions</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100">
-                  {filteredCertificates.map((cert) => {
-                    const picked = selectedCertIds.has(cert.id);
-                    return (
-                      <tr key={cert.id} className="hover:bg-slate-50/70">
-                        <td className="py-3 px-4">
-                          <button
-                            type="button"
-                            onClick={() => toggleHistoryCertSelect(cert.id)}
-                            aria-label={`Select certificate ${cert.certificateNumber}`}
-                            className="text-slate-500 hover:text-blue-700"
-                          >
-                            {picked ? (
-                              <CheckSquare className="w-4 h-4 text-blue-700" />
-                            ) : (
-                              <Square className="w-4 h-4" />
-                            )}
-                          </button>
-                        </td>
-                        <td className="py-3 px-4 font-mono-tabular text-xs font-bold text-slate-800 whitespace-nowrap">
-                          {cert.certificateNumber}
-                        </td>
-                        <td className="py-3 px-4">
-                          <div className="font-semibold text-slate-900">
-                            {cert.participantName}
-                          </div>
-                          {cert.participantDepartment && (
-                            <div className="text-xs text-slate-500">
-                              {cert.participantDepartment}
-                            </div>
-                          )}
-                        </td>
-                        <td className="py-3 px-4">
-                          <span className="inline-flex items-center px-2.5 py-0.5 rounded-md text-xs font-semibold bg-amber-50 text-amber-800 border border-amber-200">
-                            {cert.categoryName}
-                          </span>
-                          {cert.termCategoryName &&
-                            cert.termCategoryName.toLowerCase() !==
-                              cert.categoryName.toLowerCase() && (
-                              <div className="text-[11px] font-medium text-slate-500 mt-0.5">
-                                {cert.termCategoryName}
-                              </div>
-                            )}
-                        </td>
-                        <td className="py-3 px-4 text-xs">
-                          <div className="font-semibold text-slate-800">
-                            {cert.eventTitle}
-                          </div>
-                          {cert.eventTopic && (
-                            <div className="text-slate-500 truncate max-w-[200px]">
-                              {cert.eventTopic}
-                            </div>
-                          )}
-                        </td>
-                        <td className="py-3 px-4 font-mono-tabular text-xs text-slate-600 whitespace-nowrap">
-                          {cert.issueDate}
-                        </td>
-                        <td className="py-3 px-4 text-right whitespace-nowrap">
-                          <div className="inline-flex items-center gap-1.5">
-                            <button
-                              type="button"
-                              onClick={() =>
-                                downloadRecognitionCertificatesPdf(
-                                  [cert],
-                                  templateConfig,
-                                  branding
-                                )
-                              }
-                              className="min-h-[34px] px-2.5 py-1 rounded-lg border border-slate-300 bg-white hover:bg-slate-100 text-xs font-semibold text-slate-800 inline-flex items-center gap-1"
-                            >
-                              <Download className="w-3.5 h-3.5" />
-                              <span>PDF</span>
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() =>
-                                printRecognitionCertificatesPdf(
-                                  [cert],
-                                  templateConfig,
-                                  branding
-                                )
-                              }
-                              className="min-h-[34px] min-w-[34px] rounded-lg border border-slate-300 bg-white hover:bg-slate-100 text-slate-700 inline-flex items-center justify-center"
-                              aria-label={`Print certificate ${cert.certificateNumber}`}
-                            >
-                              <Printer className="w-3.5 h-3.5" />
-                            </button>
-                            <button
-                              type="button"
-                              disabled={deletingCertId === cert.id}
-                              onClick={() => void handleDeleteCertificate(cert.id)}
-                              className="min-h-[34px] min-w-[34px] rounded-lg border border-slate-200 text-rose-700 hover:bg-rose-50 inline-flex items-center justify-center disabled:opacity-40"
-                              aria-label={`Revoke certificate ${cert.certificateNumber}`}
-                            >
-                              {deletingCertId === cert.id ? (
-                                <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                              ) : (
-                                <Trash2 className="w-3.5 h-3.5" />
-                              )}
-                            </button>
-                          </div>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          )}
         </div>
       )}
     </div>

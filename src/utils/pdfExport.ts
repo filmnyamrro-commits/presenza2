@@ -10,10 +10,12 @@ import type {
   FeedbackSubmissionRecord,
   IssuedCertificateRecord,
   OrganizationBranding,
+  RecognitionCategory,
   RecognitionTemplateConfig,
 } from '../types';
 import {
   DEFAULT_TERM_BEST_CATEGORIES,
+  interpolateRecognitionWording,
   mergeTermBestCategories,
   normalizeBestTermKey,
   resolveBestTermLabel,
@@ -1277,6 +1279,8 @@ function hexToRgbTuple(hex: string, fallback: [number, number, number]): [number
 
 export interface RecognitionPdfRenderOptions {
   logoDataUrl?: string;
+  backgroundDataUrl?: string;
+  backgroundOpacity?: number;
   signatureDataUrl?: string;
   picPdSignatureDataUrl?: string;
   principalSignatureDataUrl?: string;
@@ -1287,6 +1291,12 @@ export interface RecognitionPdfRenderOptions {
   showTopic?: boolean;
   showFacilitator?: boolean;
   showCertificateId?: boolean;
+}
+
+export interface RecognitionPdfBatchOptions {
+  certificateSettings?: Partial<CertificateSettings> | null;
+  categoriesById?: Map<string, RecognitionCategory>;
+  eventsById?: Map<string, EventRecord>;
 }
 
 function drawRecognitionCertificatePage(
@@ -1307,6 +1317,63 @@ function drawRecognitionCertificatePage(
   // Paper background
   doc.setFillColor(...paperRgb);
   doc.rect(0, 0, pageW, pageH, 'F');
+
+  // Optional Background Photo inside 10mm margin
+  const bgOpacity =
+    typeof options.backgroundOpacity === 'number' &&
+    Number.isFinite(options.backgroundOpacity)
+      ? Math.min(100, Math.max(0, options.backgroundOpacity))
+      : 0;
+  if (options.backgroundDataUrl && bgOpacity > 0) {
+    try {
+      const props = doc.getImageProperties(options.backgroundDataUrl);
+      const imgW = props.width || pageW;
+      const imgH = props.height || pageH;
+      const imgRatio = imgW / imgH;
+      const innerX = 10;
+      const innerY = 10;
+      const innerW = pageW - 20;
+      const innerH = pageH - 20;
+      const innerRatio = innerW / innerH;
+
+      let drawW = innerW;
+      let drawH = innerH;
+      let drawX = innerX;
+      let drawY = innerY;
+
+      if (imgRatio > innerRatio) {
+        drawH = innerH;
+        drawW = innerH * imgRatio;
+        drawX = innerX + (innerW - drawW) / 2;
+      } else {
+        drawW = innerW;
+        drawH = innerW / imgRatio;
+        drawY = innerY + (innerH - drawH) / 2;
+      }
+
+      const alpha = Math.min(1, Math.max(0, bgOpacity / 100));
+      doc.saveGraphicsState();
+      doc.setGState(new GState({ opacity: alpha }));
+      doc.addImage(
+        options.backgroundDataUrl,
+        detectImageFormat(options.backgroundDataUrl),
+        drawX,
+        drawY,
+        drawW,
+        drawH
+      );
+      doc.restoreGraphicsState();
+      doc.setGState(new GState({ opacity: 1 }));
+
+      doc.setFillColor(...paperRgb);
+      doc.rect(0, 0, pageW, 10, 'F');
+      doc.rect(0, pageH - 10, pageW, 10, 'F');
+      doc.rect(0, 0, 10, pageH, 'F');
+      doc.rect(pageW - 10, 0, 10, pageH, 'F');
+    } catch {
+      // Ignore malformed background image gracefully
+    }
+  }
 
   // Double border frame + subtle top accent strip
   doc.setFillColor(...primaryRgb);
@@ -1446,7 +1513,9 @@ function drawRecognitionCertificatePage(
 
   // Event Context Details (Topic / Theme / Facilitator)
   const metaParts: string[] = [];
-  if (cert.eventTheme?.trim()) metaParts.push(`Theme: ${cert.eventTheme.trim()}`);
+  if (options.showTopic !== false && cert.eventTheme?.trim()) {
+    metaParts.push(`Theme: ${cert.eventTheme.trim()}`);
+  }
   if (options.showTopic !== false && cert.eventTopic?.trim()) {
     metaParts.push(`Topic: ${cert.eventTopic.trim()}`);
   }
@@ -1541,25 +1610,138 @@ function drawRecognitionCertificatePage(
   }
 }
 
+function resolveSyncedCertificateRecord(
+  cert: IssuedCertificateRecord,
+  template?: Partial<RecognitionTemplateConfig> | null,
+  branding?: OrganizationBranding | null,
+  extraOptions?: RecognitionPdfBatchOptions
+): IssuedCertificateRecord {
+  const liveEvent = extraOptions?.eventsById?.get(cert.eventId);
+  const liveCategory = extraOptions?.categoriesById?.get(cert.categoryId);
+  const resolvedCategoryName = liveCategory?.name?.trim() || cert.categoryName;
+  const resolvedEventTitle = liveEvent?.title?.trim() || cert.eventTitle;
+  const resolvedEventDate = liveEvent?.eventDate?.trim() || cert.eventDate;
+  const resolvedEventVenue = liveEvent?.venue?.trim() || cert.eventVenue;
+  const resolvedEventTopic =
+    liveEvent?.topic?.trim() || liveEvent?.category?.trim() || cert.eventTopic;
+  const resolvedEventTheme = liveEvent?.theme?.trim() || cert.eventTheme;
+  const resolvedFacilitators = liveEvent?.facilitators?.trim() || cert.facilitators;
+  const resolvedOrganizer =
+    branding?.organizationName?.trim() || cert.organizerName || 'PRESENZA';
+
+  if (!template) {
+    return {
+      ...cert,
+      categoryName: resolvedCategoryName,
+      eventTitle: resolvedEventTitle,
+      eventDate: resolvedEventDate,
+      eventVenue: resolvedEventVenue,
+      eventTopic: resolvedEventTopic,
+      eventTheme: resolvedEventTheme,
+      facilitators: resolvedFacilitators,
+      organizerName: resolvedOrganizer,
+    };
+  }
+
+  const resolvedPicPdName =
+    typeof template.picPdName === 'string'
+      ? template.picPdName.trim()
+      : cert.picPdName || '';
+  const resolvedPicPdTitle =
+    typeof template.picPdTitle === 'string' && template.picPdTitle.trim()
+      ? template.picPdTitle.trim()
+      : cert.picPdTitle || 'PIC of Professional Development';
+  const resolvedPrincipalName =
+    typeof template.principalName === 'string'
+      ? template.principalName.trim()
+      : cert.principalName || '';
+  const resolvedPrincipalTitle =
+    typeof template.principalTitle === 'string' && template.principalTitle.trim()
+      ? template.principalTitle.trim()
+      : cert.principalTitle || 'Principal';
+
+  const hasTermSetting = template.bestTerm !== undefined;
+  const resolvedTermCategoryName = hasTermSetting
+    ? resolveBestTermLabel(template.bestTerm, template.termBestCategories)
+    : cert.termCategoryName || '';
+
+  const resolvedWording = template.wordingTemplate?.trim()
+    ? interpolateRecognitionWording(template.wordingTemplate, {
+        participant: cert.participantName,
+        category: resolvedCategoryName,
+        event: resolvedEventTitle,
+        date: resolvedEventDate,
+        venue: resolvedEventVenue,
+        topic: resolvedEventTopic,
+        theme: resolvedEventTheme,
+        facilitator: resolvedPicPdName || resolvedFacilitators,
+        organizer: resolvedOrganizer,
+        department: cert.participantDepartment,
+      })
+    : cert.wordingText;
+
+  return {
+    ...cert,
+    orientation: template.orientation || cert.orientation,
+    primaryColor: template.primaryColor || cert.primaryColor,
+    accentColor: template.accentColor || cert.accentColor,
+    paperColor: template.paperColor || cert.paperColor,
+    fontFamily: template.fontFamily || cert.fontFamily,
+    certificateTitle: template.title?.trim() || cert.certificateTitle,
+    certificateSubtitle:
+      typeof template.subtitle === 'string'
+        ? template.subtitle
+        : cert.certificateSubtitle,
+    categoryName: resolvedCategoryName,
+    bestTerm: template.bestTerm ?? cert.bestTerm,
+    termCategoryName: resolvedTermCategoryName,
+    eventTitle: resolvedEventTitle,
+    eventDate: resolvedEventDate,
+    eventVenue: resolvedEventVenue,
+    eventTopic: resolvedEventTopic,
+    eventTheme: resolvedEventTheme,
+    facilitators: resolvedFacilitators,
+    organizerName: resolvedOrganizer,
+    wordingText: resolvedWording,
+    picPdName: resolvedPicPdName,
+    picPdTitle: resolvedPicPdTitle,
+    principalName: resolvedPrincipalName,
+    principalTitle: resolvedPrincipalTitle,
+  };
+}
+
 function buildRecognitionPdfDoc(
   certs: IssuedCertificateRecord[],
   template?: Partial<RecognitionTemplateConfig> | null,
-  branding?: OrganizationBranding | null
+  branding?: OrganizationBranding | null,
+  extraOptions?: RecognitionPdfBatchOptions
 ): jsPDF {
   const firstOrientation =
-    certs[0]?.orientation || template?.orientation || 'landscape';
+    template?.orientation || certs[0]?.orientation || 'landscape';
   const doc = new jsPDF({
     orientation: firstOrientation,
     unit: 'mm',
     format: 'a4',
   });
 
+  const certBg = extraOptions?.certificateSettings;
   const renderOptions: RecognitionPdfRenderOptions = {
     logoDataUrl: template?.customLogoDataUrl || branding?.logoDataUrl || '',
+    backgroundDataUrl: certBg?.backgroundDataUrl || '',
+    backgroundOpacity:
+      typeof certBg?.backgroundOpacity === 'number'
+        ? certBg.backgroundOpacity
+        : 22,
     signatureDataUrl: template?.signatureDataUrl || '',
     picPdSignatureDataUrl:
-      template?.picPdSignatureDataUrl || template?.signatureDataUrl || '',
-    principalSignatureDataUrl: template?.principalSignatureDataUrl || '',
+      template?.picPdSignatureDataUrl ||
+      template?.signatureDataUrl ||
+      certBg?.facilitatorSignatureDataUrl ||
+      '',
+    principalSignatureDataUrl:
+      template?.principalSignatureDataUrl ||
+      certBg?.principalSignatureDataUrl ||
+      '',
     picPdName: template?.picPdName || '',
     picPdTitle: template?.picPdTitle || 'PIC of Professional Development',
     principalName: template?.principalName || '',
@@ -1569,12 +1751,19 @@ function buildRecognitionPdfDoc(
     showCertificateId: template?.showCertificateId ?? true,
   };
 
-  certs.forEach((cert, idx) => {
-    const orient = cert.orientation === 'portrait' ? 'portrait' : 'landscape';
+  certs.forEach((rawCert, idx) => {
+    const syncedCert = resolveSyncedCertificateRecord(
+      rawCert,
+      template,
+      branding,
+      extraOptions
+    );
+    const orient =
+      syncedCert.orientation === 'portrait' ? 'portrait' : 'landscape';
     if (idx > 0) {
       doc.addPage('a4', orient);
     }
-    drawRecognitionCertificatePage(doc, cert, renderOptions);
+    drawRecognitionCertificatePage(doc, syncedCert, renderOptions);
   });
 
   return doc;
@@ -1584,26 +1773,34 @@ export function downloadRecognitionCertificatesPdf(
   certs: IssuedCertificateRecord[],
   template?: Partial<RecognitionTemplateConfig> | null,
   branding?: OrganizationBranding | null,
-  filenamePrefix?: string
+  filenamePrefix?: string,
+  extraOptions?: RecognitionPdfBatchOptions
 ): void {
   if (certs.length === 0) return;
-  const doc = buildRecognitionPdfDoc(certs, template, branding);
+  const doc = buildRecognitionPdfDoc(certs, template, branding, extraOptions);
+  const firstSynced = resolveSyncedCertificateRecord(
+    certs[0],
+    template,
+    branding,
+    extraOptions
+  );
   const slug =
     filenamePrefix
       ? slugify(filenamePrefix)
       : certs.length === 1
-      ? `${slugify(certs[0].categoryName)}-${slugify(certs[0].participantName)}`
-      : `${slugify(certs[0].eventTitle)}-recognition-certificates`;
+      ? `${slugify(firstSynced.categoryName)}-${slugify(firstSynced.participantName)}`
+      : `${slugify(firstSynced.eventTitle)}-recognition-certificates`;
   doc.save(`presenza-recognition-${slug}-${new Date().toISOString().slice(0, 10)}.pdf`);
 }
 
 export function printRecognitionCertificatesPdf(
   certs: IssuedCertificateRecord[],
   template?: Partial<RecognitionTemplateConfig> | null,
-  branding?: OrganizationBranding | null
+  branding?: OrganizationBranding | null,
+  extraOptions?: RecognitionPdfBatchOptions
 ): void {
   if (certs.length === 0) return;
-  const doc = buildRecognitionPdfDoc(certs, template, branding);
+  const doc = buildRecognitionPdfDoc(certs, template, branding, extraOptions);
   doc.autoPrint();
   const blobUrl = URL.createObjectURL(doc.output('blob'));
   const iframe = document.createElement('iframe');
