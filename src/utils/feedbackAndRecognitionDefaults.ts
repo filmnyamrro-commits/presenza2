@@ -1,9 +1,11 @@
 import type {
+  CertificateTermKey,
   FeedbackConfig,
   FeedbackRatingCriterion,
   FeedbackStatement,
   FeedbackStatementCategory,
   RecognitionTemplateConfig,
+  TermBestCategoryNames,
 } from '../types';
 
 export const DEFAULT_RATING_CRITERIA: FeedbackRatingCriterion[] = [
@@ -472,7 +474,99 @@ export const DEFAULT_RECOGNITION_CATEGORIES: ReadonlyArray<{
       'Guiding peers with clarity, initiative, and encouraging group facilitation.',
     sortOrder: 10,
   },
+  {
+    id: 'rec_best_term_1',
+    name: 'Best Category — Term 1',
+    description:
+      'Top achievement and exemplary professional growth recognized for Term 1.',
+    sortOrder: 11,
+  },
+  {
+    id: 'rec_best_term_2',
+    name: 'Best Category — Term 2',
+    description:
+      'Top achievement and exemplary professional growth recognized for Term 2.',
+    sortOrder: 12,
+  },
+  {
+    id: 'rec_best_term_3',
+    name: 'Best Category — Term 3',
+    description:
+      'Top achievement and exemplary professional growth recognized for Term 3.',
+    sortOrder: 13,
+  },
+  {
+    id: 'rec_best_term_4',
+    name: 'Best Category — Term 4',
+    description:
+      'Top achievement and exemplary professional growth recognized for Term 4.',
+    sortOrder: 14,
+  },
 ];
+
+export const DEFAULT_TERM_BEST_CATEGORIES: TermBestCategoryNames = {
+  term1: 'Best Category — Term 1',
+  term2: 'Best Category — Term 2',
+  term3: 'Best Category — Term 3',
+  term4: 'Best Category — Term 4',
+};
+
+export const CERTIFICATE_TERM_OPTIONS: ReadonlyArray<{
+  key: CertificateTermKey;
+  shortLabel: string;
+  termTitle: string;
+}> = [
+  { key: 'none', shortLabel: 'Standard', termTitle: 'Standard Award' },
+  { key: 'term1', shortLabel: 'Term 1', termTitle: 'Term 1' },
+  { key: 'term2', shortLabel: 'Term 2', termTitle: 'Term 2' },
+  { key: 'term3', shortLabel: 'Term 3', termTitle: 'Term 3' },
+  { key: 'term4', shortLabel: 'Term 4', termTitle: 'Term 4' },
+];
+
+export function normalizeBestTermKey(value: unknown): CertificateTermKey {
+  if (
+    value === 'term1' ||
+    value === 'term2' ||
+    value === 'term3' ||
+    value === 'term4'
+  ) {
+    return value;
+  }
+  return 'none';
+}
+
+export function mergeTermBestCategories(
+  partial?: Partial<TermBestCategoryNames> | null
+): TermBestCategoryNames {
+  return {
+    term1:
+      typeof partial?.term1 === 'string' && partial.term1.trim()
+        ? partial.term1.slice(0, 100)
+        : DEFAULT_TERM_BEST_CATEGORIES.term1,
+    term2:
+      typeof partial?.term2 === 'string' && partial.term2.trim()
+        ? partial.term2.slice(0, 100)
+        : DEFAULT_TERM_BEST_CATEGORIES.term2,
+    term3:
+      typeof partial?.term3 === 'string' && partial.term3.trim()
+        ? partial.term3.slice(0, 100)
+        : DEFAULT_TERM_BEST_CATEGORIES.term3,
+    term4:
+      typeof partial?.term4 === 'string' && partial.term4.trim()
+        ? partial.term4.slice(0, 100)
+        : DEFAULT_TERM_BEST_CATEGORIES.term4,
+  };
+}
+
+export function resolveBestTermLabel(
+  bestTerm: CertificateTermKey | undefined,
+  termBestCategories?: Partial<TermBestCategoryNames> | null
+): string {
+  const key = normalizeBestTermKey(bestTerm);
+  if (key === 'none') return '';
+  const merged = mergeTermBestCategories(termBestCategories);
+  return merged[key].trim() || DEFAULT_TERM_BEST_CATEGORIES[key];
+}
 
 export const DEFAULT_RECOGNITION_TEMPLATE: RecognitionTemplateConfig = {
   orientation: 'landscape',
@@ -486,7 +580,15 @@ export const DEFAULT_RECOGNITION_TEMPLATE: RecognitionTemplateConfig = {
   paperColor: '#FFFFFF',
   customLogoDataUrl: '',
   signatureDataUrl: '',
-  signatoryLabel: 'Authorized Program Coordinator',
+  signatoryLabel: 'PIC of Professional Development',
+  bestTerm: 'none',
+  termBestCategories: { ...DEFAULT_TERM_BEST_CATEGORIES },
+  picPdName: '',
+  picPdTitle: 'PIC of Professional Development',
+  picPdSignatureDataUrl: '',
+  principalName: '',
+  principalTitle: 'Principal',
+  principalSignatureDataUrl: '',
   showTopic: true,
   showFacilitator: true,
   showCertificateId: true,
@@ -497,7 +599,25 @@ const HEX_COLOR_REGEX = /^#[0-9a-fA-F]{6}$/;
 export function mergeRecognitionTemplate(
   partial?: Partial<RecognitionTemplateConfig> | null
 ): RecognitionTemplateConfig {
-  if (!partial) return { ...DEFAULT_RECOGNITION_TEMPLATE };
+  if (!partial) {
+    return {
+      ...DEFAULT_RECOGNITION_TEMPLATE,
+      termBestCategories: { ...DEFAULT_TERM_BEST_CATEGORIES },
+    };
+  }
+  const legacySig =
+    typeof partial.signatureDataUrl === 'string'
+      ? partial.signatureDataUrl
+      : '';
+  const picPdSig =
+    typeof partial.picPdSignatureDataUrl === 'string'
+      ? partial.picPdSignatureDataUrl
+      : legacySig;
+  const principalSig =
+    typeof partial.principalSignatureDataUrl === 'string'
+      ? partial.principalSignatureDataUrl
+      : '';
+
   return {
     orientation:
       partial.orientation === 'portrait' ? 'portrait' : 'landscape',
@@ -537,14 +657,31 @@ export function mergeRecognitionTemplate(
       typeof partial.customLogoDataUrl === 'string'
         ? partial.customLogoDataUrl
         : '',
-    signatureDataUrl:
-      typeof partial.signatureDataUrl === 'string'
-        ? partial.signatureDataUrl
-        : '',
+    signatureDataUrl: legacySig,
     signatoryLabel:
       typeof partial.signatoryLabel === 'string'
         ? partial.signatoryLabel.slice(0, 120)
         : DEFAULT_RECOGNITION_TEMPLATE.signatoryLabel,
+    bestTerm: normalizeBestTermKey(partial.bestTerm),
+    termBestCategories: mergeTermBestCategories(partial.termBestCategories),
+    picPdName:
+      typeof partial.picPdName === 'string'
+        ? partial.picPdName.slice(0, 120)
+        : '',
+    picPdTitle:
+      typeof partial.picPdTitle === 'string' && partial.picPdTitle.trim()
+        ? partial.picPdTitle.slice(0, 120)
+        : DEFAULT_RECOGNITION_TEMPLATE.picPdTitle,
+    picPdSignatureDataUrl: picPdSig,
+    principalName:
+      typeof partial.principalName === 'string'
+        ? partial.principalName.slice(0, 120)
+        : '',
+    principalTitle:
+      typeof partial.principalTitle === 'string' && partial.principalTitle.trim()
+        ? partial.principalTitle.slice(0, 120)
+        : DEFAULT_RECOGNITION_TEMPLATE.principalTitle,
+    principalSignatureDataUrl: principalSig,
     showTopic:
       typeof partial.showTopic === 'boolean'
         ? partial.showTopic

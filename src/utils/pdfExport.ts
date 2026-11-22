@@ -11,6 +11,12 @@ import type {
   OrganizationBranding,
   RecognitionTemplateConfig,
 } from '../types';
+import {
+  DEFAULT_TERM_BEST_CATEGORIES,
+  mergeTermBestCategories,
+  normalizeBestTermKey,
+  resolveBestTermLabel,
+} from './feedbackAndRecognitionDefaults';
 
 export interface CertificateThemeDefinition {
   id: CertificateThemeId;
@@ -192,9 +198,9 @@ export const DEFAULT_CERTIFICATE_ELEMENTS: CertificateElementsMap = {
   department: { visible: true, x: 148.5, y: 124.5 },
   citation: { visible: true, x: 148.5, y: 135.5 },
   seal: { visible: true, x: 148.5, y: 158 },
-  dateFooter: { visible: true, x: 58, y: 180 },
-  facilitatorBlock: { visible: true, x: 148.5, y: 180 },
-  principalBlock: { visible: true, x: 239, y: 180 },
+  dateFooter: { visible: false, x: 148.5, y: 180 },
+  facilitatorBlock: { visible: true, x: 82, y: 180 },
+  principalBlock: { visible: true, x: 215, y: 180 },
 };
 
 export const CERTIFICATE_ELEMENT_META: ReadonlyArray<{
@@ -206,7 +212,7 @@ export const CERTIFICATE_ELEMENT_META: ReadonlyArray<{
   { key: 'kicker', label: 'PRESENZA Header' },
   { key: 'title', label: 'Certificate Title' },
   { key: 'subtitle', label: 'Subtitle Line' },
-  { key: 'rankBadge', label: 'Rank Distinction Badge' },
+  { key: 'rankBadge', label: 'Rank / Term Badge' },
   { key: 'photo', label: 'Participant Photo' },
   { key: 'awardedTo', label: 'Awarded-To Intro' },
   { key: 'recipientName', label: 'Recipient Name' },
@@ -214,7 +220,7 @@ export const CERTIFICATE_ELEMENT_META: ReadonlyArray<{
   { key: 'citation', label: 'Citation Paragraph' },
   { key: 'seal', label: 'Recognition Seal' },
   { key: 'dateFooter', label: 'Date & Time Footer' },
-  { key: 'facilitatorBlock', label: 'Facilitator & Signature' },
+  { key: 'facilitatorBlock', label: 'PIC of PD & Signature' },
   { key: 'principalBlock', label: 'Principal & Signature' },
 ];
 
@@ -224,6 +230,12 @@ export const DEFAULT_CERTIFICATE_SETTINGS: CertificateSettings = {
   backgroundOpacity: 22,
   facilitatorSignatureDataUrl: '',
   principalSignatureDataUrl: '',
+  picPdName: '',
+  picPdTitle: 'PIC of Professional Development',
+  principalName: '',
+  principalTitle: 'Principal',
+  bestTerm: 'none',
+  termBestCategories: { ...DEFAULT_TERM_BEST_CATEGORIES },
   elements: DEFAULT_CERTIFICATE_ELEMENTS,
 };
 
@@ -270,6 +282,25 @@ export function mergeCertificateSettings(
         : DEFAULT_CERTIFICATE_SETTINGS.backgroundOpacity,
     facilitatorSignatureDataUrl: partial?.facilitatorSignatureDataUrl || '',
     principalSignatureDataUrl: partial?.principalSignatureDataUrl || '',
+    picPdName:
+      typeof partial?.picPdName === 'string'
+        ? partial.picPdName.slice(0, 120)
+        : '',
+    picPdTitle:
+      typeof partial?.picPdTitle === 'string' && partial.picPdTitle.trim()
+        ? partial.picPdTitle.slice(0, 120)
+        : DEFAULT_CERTIFICATE_SETTINGS.picPdTitle,
+    principalName:
+      typeof partial?.principalName === 'string'
+        ? partial.principalName.slice(0, 120)
+        : '',
+    principalTitle:
+      typeof partial?.principalTitle === 'string' &&
+      partial.principalTitle.trim()
+        ? partial.principalTitle.slice(0, 120)
+        : DEFAULT_CERTIFICATE_SETTINGS.principalTitle,
+    bestTerm: normalizeBestTermKey(partial?.bestTerm),
+    termBestCategories: mergeTermBestCategories(partial?.termBestCategories),
     elements: mergedElements,
   };
 }
@@ -908,10 +939,19 @@ function drawCertificatePage(
     });
   }
 
-  // 6. Rank Distinction Ribbon Box
+  // 6. Rank Distinction / Best Term Ribbon Box
+  const bestTermLabel = resolveBestTermLabel(
+    settings.bestTerm,
+    settings.termBestCategories
+  );
   if (el.rankBadge.visible) {
     const isPodium = rank <= 3;
-    const badgeW = 92;
+    const badgeText = bestTermLabel
+      ? `${bestTermLabel.toUpperCase()} · RANK #${rank}`
+      : `RANK #${rank} · ${ordinalLabel(rank).toUpperCase()}`;
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(9.5);
+    const badgeW = Math.min(230, Math.max(92, doc.getTextWidth(badgeText) + 18));
     const badgeH = 9;
     const badgeX = el.rankBadge.x - badgeW / 2;
     const badgeY = el.rankBadge.y - badgeH / 2;
@@ -926,19 +966,14 @@ function drawCertificatePage(
     doc.setLineWidth(0.5);
     doc.roundedRect(badgeX, badgeY, badgeW, badgeH, 2, 2, 'FD');
 
-    doc.setFont('helvetica', 'bold');
-    doc.setFontSize(10);
     if (isPodium) {
       doc.setTextColor(...theme.podiumBadgeTextRgb);
     } else {
       doc.setTextColor(...theme.accentRgb);
     }
-    doc.text(
-      `RANK #${rank} · ${ordinalLabel(rank).toUpperCase()}`,
-      el.rankBadge.x,
-      el.rankBadge.y + 1.5,
-      { align: 'center' }
-    );
+    doc.text(badgeText, el.rankBadge.x, el.rankBadge.y + 1.5, {
+      align: 'center',
+    });
   }
 
   // 7. Participant Photo (centered on el.photo.x, el.photo.y)
@@ -1059,10 +1094,19 @@ function drawCertificatePage(
     );
   }
 
-  const facilitatorText = event?.facilitators?.trim() || 'Session Facilitator';
-  const principalText = event?.principalName?.trim() || 'School Principal';
+  const picPdNameText =
+    settings.picPdName.trim() ||
+    event?.facilitators?.trim() ||
+    '';
+  const picPdTitleText =
+    settings.picPdTitle.trim() || 'PIC of Professional Development';
+  const principalNameText =
+    settings.principalName.trim() ||
+    event?.principalName?.trim() ||
+    '';
+  const principalTitleText = settings.principalTitle.trim() || 'Principal';
 
-  // 13. Verified Check-In Date & Time Block
+  // 13. Verified Check-In Date & Time Block (optional; hidden in native layout)
   if (el.dateFooter.visible) {
     const cx = el.dateFooter.x;
     const cy = el.dateFooter.y;
@@ -1083,36 +1127,41 @@ function drawCertificatePage(
     });
   }
 
-  // 14. Facilitator Block + Optional Digital Signature
+  // 14. PIC of Professional Development Block + Optional Digital Signature
   if (el.facilitatorBlock.visible) {
     const cx = el.facilitatorBlock.x;
     const cy = el.facilitatorBlock.y;
     doc.setDrawColor(148, 163, 184);
     doc.setLineWidth(0.4);
-    doc.line(cx - 34, cy, cx + 34, cy);
+    doc.line(cx - 38, cy, cx + 38, cy);
 
-    doc.setFont('helvetica', 'bold');
-    doc.setFontSize(9);
-    doc.setTextColor(...theme.headingRgb);
-    const facLines = doc.splitTextToSize(facilitatorText, 66).slice(0, 2);
-    const facStartY = cy - 3 - (facLines.length - 1) * 4;
+    const facLines = picPdNameText
+      ? doc.splitTextToSize(picPdNameText, 72).slice(0, 2)
+      : [];
+    const facStartY = cy - 3 - Math.max(0, facLines.length - 1) * 4;
+    const sigBottomY = facLines.length > 0 ? facStartY - 3.5 : cy - 2;
 
     if (settings.facilitatorSignatureDataUrl) {
       drawAspectContainedImage(
         doc,
         settings.facilitatorSignatureDataUrl,
         cx,
-        facStartY - 3.5,
-        44,
-        13
+        sigBottomY,
+        46,
+        14
       );
     }
 
-    doc.text(facLines, cx, facStartY, { align: 'center' });
+    if (facLines.length > 0) {
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(9);
+      doc.setTextColor(...theme.headingRgb);
+      doc.text(facLines, cx, facStartY, { align: 'center' });
+    }
     doc.setFont('helvetica', 'normal');
     doc.setFontSize(8.5);
     doc.setTextColor(...theme.subtitleRgb);
-    doc.text('Facilitators', cx, cy + 5, { align: 'center' });
+    doc.text(picPdTitleText, cx, cy + 5, { align: 'center' });
   }
 
   // 15. Principal Block + Optional Digital Signature
@@ -1121,30 +1170,35 @@ function drawCertificatePage(
     const cy = el.principalBlock.y;
     doc.setDrawColor(148, 163, 184);
     doc.setLineWidth(0.4);
-    doc.line(cx - 34, cy, cx + 34, cy);
+    doc.line(cx - 38, cy, cx + 38, cy);
 
-    doc.setFont('helvetica', 'bold');
-    doc.setFontSize(9);
-    doc.setTextColor(...theme.headingRgb);
-    const principalLines = doc.splitTextToSize(principalText, 66).slice(0, 2);
-    const principalStartY = cy - 3 - (principalLines.length - 1) * 4;
+    const principalLines = principalNameText
+      ? doc.splitTextToSize(principalNameText, 72).slice(0, 2)
+      : [];
+    const principalStartY = cy - 3 - Math.max(0, principalLines.length - 1) * 4;
+    const sigBottomY = principalLines.length > 0 ? principalStartY - 3.5 : cy - 2;
 
     if (settings.principalSignatureDataUrl) {
       drawAspectContainedImage(
         doc,
         settings.principalSignatureDataUrl,
         cx,
-        principalStartY - 3.5,
-        44,
-        13
+        sigBottomY,
+        46,
+        14
       );
     }
 
-    doc.text(principalLines, cx, principalStartY, { align: 'center' });
+    if (principalLines.length > 0) {
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(9);
+      doc.setTextColor(...theme.headingRgb);
+      doc.text(principalLines, cx, principalStartY, { align: 'center' });
+    }
     doc.setFont('helvetica', 'normal');
     doc.setFontSize(8.5);
     doc.setTextColor(...theme.subtitleRgb);
-    doc.text('Principal', cx, cy + 5, { align: 'center' });
+    doc.text(principalTitleText, cx, cy + 5, { align: 'center' });
   }
 }
 
@@ -1223,6 +1277,12 @@ function hexToRgbTuple(hex: string, fallback: [number, number, number]): [number
 export interface RecognitionPdfRenderOptions {
   logoDataUrl?: string;
   signatureDataUrl?: string;
+  picPdSignatureDataUrl?: string;
+  principalSignatureDataUrl?: string;
+  picPdName?: string;
+  picPdTitle?: string;
+  principalName?: string;
+  principalTitle?: string;
   showTopic?: boolean;
   showFacilitator?: boolean;
   showCertificateId?: boolean;
@@ -1323,11 +1383,15 @@ function drawRecognitionCertificatePage(
     cursorY += 4;
   }
 
-  // Category Recognition Ribbon
-  const catText = cert.categoryName.toUpperCase();
+  // Category Recognition Ribbon (with optional Term 1–4 Best Category distinction)
+  const termCatLabel = cert.termCategoryName?.trim() || '';
+  const catText =
+    termCatLabel && termCatLabel.toLowerCase() !== cert.categoryName.trim().toLowerCase()
+      ? `${termCatLabel.toUpperCase()} · ${cert.categoryName.toUpperCase()}`
+      : cert.categoryName.toUpperCase();
   doc.setFont('helvetica', 'bold');
-  doc.setFontSize(10);
-  const ribbonW = Math.min(pageW - 48, Math.max(76, doc.getTextWidth(catText) + 18));
+  doc.setFontSize(9.5);
+  const ribbonW = Math.min(pageW - 44, Math.max(76, doc.getTextWidth(catText) + 18));
   const ribbonH = 9.5;
   doc.setFillColor(248, 250, 252);
   doc.setDrawColor(...accentRgb);
@@ -1394,69 +1458,81 @@ function drawRecognitionCertificatePage(
     cursorY += metaLines.length * 4.5 + 3;
   }
 
-  // Footer Signature & Metadata Row
+  // Footer Signature Row — Native layout provides PIC of Professional Development & Principal
   const footerLineY = pageH - (isPortrait ? 38 : 30);
-  const sideOffset = isPortrait ? 46 : 78;
-  const showFac = options.showFacilitator !== false && Boolean(cert.facilitators?.trim());
+  const sideOffset = isPortrait ? 44 : 62;
+  const leftX = centerX - sideOffset;
+  const rightX = centerX + sideOffset;
 
-  // Left block: Issue Date & Location
-  const leftX = showFac ? centerX - sideOffset : centerX - (isPortrait ? 42 : 56);
+  const picPdNameText =
+    cert.picPdName?.trim() || options.picPdName?.trim() || '';
+  const picPdTitleText =
+    cert.picPdTitle?.trim() ||
+    options.picPdTitle?.trim() ||
+    'PIC of Professional Development';
+  const picPdSig = options.picPdSignatureDataUrl || options.signatureDataUrl || '';
+
+  const principalNameText =
+    cert.principalName?.trim() || options.principalName?.trim() || '';
+  const principalTitleText =
+    cert.principalTitle?.trim() || options.principalTitle?.trim() || 'Principal';
+  const principalSig = options.principalSignatureDataUrl || '';
+
+  // Bottom Left: PIC of Professional Development + Signature + Customizable Name
   doc.setDrawColor(148, 163, 184);
   doc.setLineWidth(0.4);
-  doc.line(leftX - 30, footerLineY, leftX + 30, footerLineY);
-  doc.setFont('helvetica', 'bold');
-  doc.setFontSize(9);
-  doc.setTextColor(...primaryRgb);
-  doc.text(cert.issueDate || cert.eventDate, leftX, footerLineY - 3, {
-    align: 'center',
-  });
-  doc.setFont('helvetica', 'normal');
-  doc.setFontSize(8);
-  doc.setTextColor(100, 116, 139);
-  doc.text('Date Issued', leftX, footerLineY + 4.5, { align: 'center' });
-
-  // Center or Right block: Signatory + Digital Signature
-  const sigX = showFac ? centerX : centerX + (isPortrait ? 42 : 56);
-  doc.setDrawColor(148, 163, 184);
-  doc.line(sigX - 32, footerLineY, sigX + 32, footerLineY);
-  if (options.signatureDataUrl) {
-    drawAspectContainedImage(doc, options.signatureDataUrl, sigX, footerLineY - 2, 46, 14);
+  doc.line(leftX - 36, footerLineY, leftX + 36, footerLineY);
+  const picNameLines = picPdNameText
+    ? doc.splitTextToSize(picPdNameText, 70).slice(0, 2)
+    : [];
+  const picNameStartY = footerLineY - 3 - Math.max(0, picNameLines.length - 1) * 3.8;
+  const picSigBottomY = picNameLines.length > 0 ? picNameStartY - 3 : footerLineY - 2;
+  if (picPdSig) {
+    drawAspectContainedImage(doc, picPdSig, leftX, picSigBottomY, 46, 14);
   }
-  doc.setFont('helvetica', 'bold');
-  doc.setFontSize(8.5);
-  doc.setTextColor(...primaryRgb);
-  const sigLabelLines = doc
-    .splitTextToSize(cert.signatoryLabel || 'Authorized Coordinator', 62)
-    .slice(0, 2);
-  doc.text(sigLabelLines, sigX, footerLineY + 4.5, { align: 'center' });
-
-  // Right block (if facilitator shown)
-  if (showFac) {
-    const rightX = centerX + sideOffset;
-    doc.setDrawColor(148, 163, 184);
-    doc.line(rightX - 30, footerLineY, rightX + 30, footerLineY);
+  if (picNameLines.length > 0) {
     doc.setFont('helvetica', 'bold');
-    doc.setFontSize(8.5);
+    doc.setFontSize(9);
     doc.setTextColor(...primaryRgb);
-    const facLines = doc.splitTextToSize(cert.facilitators, 58).slice(0, 2);
-    doc.text(facLines, rightX, footerLineY - 3 - (facLines.length - 1) * 3.5, {
-      align: 'center',
-    });
-    doc.setFont('helvetica', 'normal');
-    doc.setFontSize(8);
-    doc.setTextColor(100, 116, 139);
-    doc.text('Facilitator / Speaker', rightX, footerLineY + 4.5, {
-      align: 'center',
-    });
+    doc.text(picNameLines, leftX, picNameStartY, { align: 'center' });
   }
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(8.2);
+  doc.setTextColor(100, 116, 139);
+  const picRoleLines = doc.splitTextToSize(picPdTitleText, 74).slice(0, 2);
+  doc.text(picRoleLines, leftX, footerLineY + 4.5, { align: 'center' });
 
-  // Bottom Certificate Verification ID Strip
+  // Bottom Right: Principal + Signature + Customizable Name
+  doc.setDrawColor(148, 163, 184);
+  doc.setLineWidth(0.4);
+  doc.line(rightX - 36, footerLineY, rightX + 36, footerLineY);
+  const priNameLines = principalNameText
+    ? doc.splitTextToSize(principalNameText, 70).slice(0, 2)
+    : [];
+  const priNameStartY = footerLineY - 3 - Math.max(0, priNameLines.length - 1) * 3.8;
+  const priSigBottomY = priNameLines.length > 0 ? priNameStartY - 3 : footerLineY - 2;
+  if (principalSig) {
+    drawAspectContainedImage(doc, principalSig, rightX, priSigBottomY, 46, 14);
+  }
+  if (priNameLines.length > 0) {
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(9);
+    doc.setTextColor(...primaryRgb);
+    doc.text(priNameLines, rightX, priNameStartY, { align: 'center' });
+  }
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(8.2);
+  doc.setTextColor(100, 116, 139);
+  const priRoleLines = doc.splitTextToSize(principalTitleText, 74).slice(0, 2);
+  doc.text(priRoleLines, rightX, footerLineY + 4.5, { align: 'center' });
+
+  // Bottom Certificate Verification ID & Issue Date Strip
   if (options.showCertificateId !== false) {
     doc.setFont('courier', 'normal');
     doc.setFontSize(7.5);
     doc.setTextColor(100, 116, 139);
     doc.text(
-      `Certificate ID: ${cert.certificateNumber}   ·   Event: ${cert.eventTitle} (${cert.eventDate})`,
+      `Certificate ID: ${cert.certificateNumber}   ·   Issued: ${cert.issueDate || cert.eventDate}   ·   Event: ${cert.eventTitle}`,
       centerX,
       pageH - 16.5,
       { align: 'center' }
@@ -1480,6 +1556,13 @@ function buildRecognitionPdfDoc(
   const renderOptions: RecognitionPdfRenderOptions = {
     logoDataUrl: template?.customLogoDataUrl || branding?.logoDataUrl || '',
     signatureDataUrl: template?.signatureDataUrl || '',
+    picPdSignatureDataUrl:
+      template?.picPdSignatureDataUrl || template?.signatureDataUrl || '',
+    principalSignatureDataUrl: template?.principalSignatureDataUrl || '',
+    picPdName: template?.picPdName || '',
+    picPdTitle: template?.picPdTitle || 'PIC of Professional Development',
+    principalName: template?.principalName || '',
+    principalTitle: template?.principalTitle || 'Principal',
     showTopic: template?.showTopic ?? true,
     showFacilitator: template?.showFacilitator ?? true,
     showCertificateId: template?.showCertificateId ?? true,

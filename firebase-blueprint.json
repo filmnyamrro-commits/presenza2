@@ -392,6 +392,35 @@
           "maxLength": 150000,
           "description": "Optional transparent PNG/image data URL of the principal digital signature."
         },
+        "picPdName": {
+          "type": "string",
+          "maxLength": 120,
+          "description": "Customizable name printed above the PIC of Professional Development signature line."
+        },
+        "picPdTitle": {
+          "type": "string",
+          "maxLength": 120,
+          "description": "Signatory role title (defaults to PIC of Professional Development)."
+        },
+        "principalName": {
+          "type": "string",
+          "maxLength": 120,
+          "description": "Customizable name printed above the Principal signature line."
+        },
+        "principalTitle": {
+          "type": "string",
+          "maxLength": 120,
+          "description": "Signatory role title (defaults to Principal)."
+        },
+        "bestTerm": {
+          "type": "string",
+          "enum": ["none", "term1", "term2", "term3", "term4"],
+          "description": "Optional active academic term for Best Category certificate recognition."
+        },
+        "termBestCategories": {
+          "type": "object",
+          "description": "Customizable Best Category labels for Term 1 through Term 4."
+        },
         "elements": {
           "type": "object",
           "description": "Visibility and (x, y) position in mm for each certificate element."
@@ -623,6 +652,17 @@
         "customLogoDataUrl": { "type": "string", "maxLength": 320000 },
         "signatureDataUrl": { "type": "string", "maxLength": 150000 },
         "signatoryLabel": { "type": "string", "maxLength": 120 },
+        "bestTerm": {
+          "type": "string",
+          "enum": ["none", "term1", "term2", "term3", "term4"]
+        },
+        "termBestCategories": { "type": "object" },
+        "picPdName": { "type": "string", "maxLength": 120 },
+        "picPdTitle": { "type": "string", "maxLength": 120 },
+        "picPdSignatureDataUrl": { "type": "string", "maxLength": 150000 },
+        "principalName": { "type": "string", "maxLength": 120 },
+        "principalTitle": { "type": "string", "maxLength": 120 },
+        "principalSignatureDataUrl": { "type": "string", "maxLength": 150000 },
         "showTopic": { "type": "boolean" },
         "showFacilitator": { "type": "boolean" },
         "showCertificateId": { "type": "boolean" },
@@ -684,6 +724,11 @@
           "pattern": "^[a-zA-Z0-9_\\-]+$"
         },
         "categoryName": { "type": "string", "minLength": 2, "maxLength": 100 },
+        "bestTerm": {
+          "type": "string",
+          "enum": ["none", "term1", "term2", "term3", "term4"]
+        },
+        "termCategoryName": { "type": "string", "maxLength": 100 },
         "issueDate": { "type": "string", "minLength": 10, "maxLength": 10 },
         "selectionMethod": { "type": "string", "enum": ["manual", "evaluation"] },
         "orientation": { "type": "string", "enum": ["landscape", "portrait"] },
@@ -695,6 +740,10 @@
         "accentColor": { "type": "string", "pattern": "^#[0-9a-fA-F]{6}$" },
         "paperColor": { "type": "string", "pattern": "^#[0-9a-fA-F]{6}$" },
         "signatoryLabel": { "type": "string", "maxLength": 120 },
+        "picPdName": { "type": "string", "maxLength": 120 },
+        "picPdTitle": { "type": "string", "maxLength": 120 },
+        "principalName": { "type": "string", "maxLength": 120 },
+        "principalTitle": { "type": "string", "maxLength": 120 },
         "issuedByUid": {
           "type": "string",
           "minLength": 1,

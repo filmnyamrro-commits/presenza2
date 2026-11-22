@@ -42,6 +42,7 @@ import {
 } from '../firebase';
 import {
   type AttendanceRecord,
+  type CertificateTermKey,
   type EventRecord,
   type FeedbackSubmissionRecord,
   type IssuedCertificateRecord,
@@ -55,11 +56,14 @@ import { formatLocalDateYmd, generateSafeId } from '../utils/dateTime';
 import {
   buildCertificateDedupeKey,
   buildCertificateDocId,
+  CERTIFICATE_TERM_OPTIONS,
   DEFAULT_RECOGNITION_CATEGORIES,
   DEFAULT_RECOGNITION_TEMPLATE,
+  DEFAULT_TERM_BEST_CATEGORIES,
   generateCertificateNumber,
   interpolateRecognitionWording,
   mergeRecognitionTemplate,
+  resolveBestTermLabel,
 } from '../utils/feedbackAndRecognitionDefaults';
 import {
   compressLogoFile,
@@ -189,10 +193,13 @@ export default function AdminRecognitionModule({
   const [templateSaved, setTemplateSaved] = useState(false);
   const [templateError, setTemplateError] = useState<string | null>(null);
   const logoUploadRef = useRef<HTMLInputElement | null>(null);
-  const sigUploadRef = useRef<HTMLInputElement | null>(null);
+  const picPdSigUploadRef = useRef<HTMLInputElement | null>(null);
+  const principalSigUploadRef = useRef<HTMLInputElement | null>(null);
 
   // Signature Draw Pad
-  const [showDrawSig, setShowDrawSig] = useState(false);
+  const [drawingRole, setDrawingRole] = useState<'picPd' | 'principal' | null>(
+    null
+  );
   const drawCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const isDrawingRef = useRef(false);
 
@@ -394,6 +401,19 @@ export default function AdminRecognitionModule({
     );
     const issuerEmail = normalizeAdminEmail(user.email || '');
 
+    const activeTermCategory = resolveBestTermLabel(
+      templateConfig.bestTerm,
+      templateConfig.termBestCategories
+    ).slice(0, 100);
+    const picPdNameVal = templateConfig.picPdName.trim().slice(0, 120);
+    const picPdTitleVal = (
+      templateConfig.picPdTitle.trim() || 'PIC of Professional Development'
+    ).slice(0, 120);
+    const principalNameVal = templateConfig.principalName.trim().slice(0, 120);
+    const principalTitleVal = (
+      templateConfig.principalTitle.trim() || 'Principal'
+    ).slice(0, 120);
+
     let createdCount = 0;
     try {
       const CHUNK = 400;
@@ -445,6 +465,8 @@ export default function AdminRecognitionModule({
               : '',
             categoryId: selectedCategory.id,
             categoryName: selectedCategory.name.slice(0, 100),
+            bestTerm: templateConfig.bestTerm,
+            termCategoryName: activeTermCategory,
             issueDate: todayYmd,
             selectionMethod: selectionMode,
             orientation: templateConfig.orientation,
@@ -455,7 +477,11 @@ export default function AdminRecognitionModule({
             primaryColor: templateConfig.primaryColor,
             accentColor: templateConfig.accentColor,
             paperColor: templateConfig.paperColor,
-            signatoryLabel: templateConfig.signatoryLabel.slice(0, 120),
+            signatoryLabel: picPdTitleVal,
+            picPdName: picPdNameVal,
+            picPdTitle: picPdTitleVal,
+            principalName: principalNameVal,
+            principalTitle: principalTitleVal,
             issuedByUid: user.uid,
             issuedByEmail: issuerEmail,
             createdAt: serverTimestamp(),
@@ -546,6 +572,19 @@ export default function AdminRecognitionModule({
       }
     ).slice(0, 700);
 
+    const activeTermCategory = resolveBestTermLabel(
+      templateConfig.bestTerm,
+      templateConfig.termBestCategories
+    ).slice(0, 100);
+    const picPdNameVal = templateConfig.picPdName.trim().slice(0, 120);
+    const picPdTitleVal = (
+      templateConfig.picPdTitle.trim() || 'PIC of Professional Development'
+    ).slice(0, 120);
+    const principalNameVal = templateConfig.principalName.trim().slice(0, 120);
+    const principalTitleVal = (
+      templateConfig.principalTitle.trim() || 'Principal'
+    ).slice(0, 120);
+
     try {
       await setDoc(doc(db, 'certificates', certDocId), {
         certificateNumber: certNumber,
@@ -564,6 +603,8 @@ export default function AdminRecognitionModule({
         participantEmail: email,
         categoryId: selectedCategory.id,
         categoryName: selectedCategory.name.slice(0, 100),
+        bestTerm: templateConfig.bestTerm,
+        termCategoryName: activeTermCategory,
         issueDate: todayYmd,
         selectionMethod: 'manual',
         orientation: templateConfig.orientation,
@@ -574,7 +615,11 @@ export default function AdminRecognitionModule({
         primaryColor: templateConfig.primaryColor,
         accentColor: templateConfig.accentColor,
         paperColor: templateConfig.paperColor,
-        signatoryLabel: templateConfig.signatoryLabel.slice(0, 120),
+        signatoryLabel: picPdTitleVal,
+        picPdName: picPdNameVal,
+        picPdTitle: picPdTitleVal,
+        principalName: principalNameVal,
+        principalTitle: principalTitleVal,
         issuedByUid: user.uid,
         issuedByEmail: normalizeAdminEmail(user.email || ''),
         createdAt: serverTimestamp(),
@@ -695,6 +740,8 @@ export default function AdminRecognitionModule({
     try {
       await setDoc(doc(db, 'recognitionTemplates', 'default'), {
         ...clean,
+        signatureDataUrl: '',
+        signatoryLabel: clean.picPdTitle || 'PIC of Professional Development',
         updatedByUid: user.uid,
         updatedAt: serverTimestamp(),
       });
@@ -724,11 +771,19 @@ export default function AdminRecognitionModule({
     }
   };
 
-  const handleUploadSignature = async (file: File) => {
+  const handleUploadSignature = async (
+    role: 'picPd' | 'principal',
+    file: File
+  ) => {
     setTemplateError(null);
     try {
       const dataUrl = await compressSignatureFile(file);
-      setDraftTemplate((prev) => ({ ...prev, signatureDataUrl: dataUrl }));
+      setDraftTemplate((prev) => ({
+        ...prev,
+        ...(role === 'picPd'
+          ? { picPdSignatureDataUrl: dataUrl, signatureDataUrl: '' }
+          : { principalSignatureDataUrl: dataUrl }),
+      }));
     } catch (err) {
       setTemplateError(
         err instanceof Error ? err.message : 'Failed to process signature file.'
@@ -782,12 +837,17 @@ export default function AdminRecognitionModule({
 
   const handleApplyDrawnSignature = () => {
     const canvas = drawCanvasRef.current;
-    if (!canvas) return;
+    if (!canvas || !drawingRole) return;
     setTemplateError(null);
     try {
       const dataUrl = compressSignatureCanvas(canvas);
-      setDraftTemplate((prev) => ({ ...prev, signatureDataUrl: dataUrl }));
-      setShowDrawSig(false);
+      setDraftTemplate((prev) => ({
+        ...prev,
+        ...(drawingRole === 'picPd'
+          ? { picPdSignatureDataUrl: dataUrl, signatureDataUrl: '' }
+          : { principalSignatureDataUrl: dataUrl }),
+      }));
+      setDrawingRole(null);
     } catch (err) {
       setTemplateError(
         err instanceof Error ? err.message : 'Please draw a signature first.'
@@ -852,23 +912,44 @@ export default function AdminRecognitionModule({
     return filteredCertificates.filter((c) => selectedCertIds.has(c.id));
   }, [filteredCertificates, selectedCertIds]);
 
+  const previewBestTermLabel = useMemo(
+    () =>
+      resolveBestTermLabel(
+        draftTemplate.bestTerm,
+        draftTemplate.termBestCategories
+      ),
+    [draftTemplate.bestTerm, draftTemplate.termBestCategories]
+  );
+
+  const previewRibbonText = useMemo(() => {
+    const baseCategory = selectedCategory?.name || 'Best Participant';
+    if (!previewBestTermLabel) return baseCategory;
+    if (previewBestTermLabel.toLowerCase() === baseCategory.toLowerCase()) {
+      return previewBestTermLabel;
+    }
+    return `${previewBestTermLabel} · ${baseCategory}`;
+  }, [previewBestTermLabel, selectedCategory?.name]);
+
   const previewSampleWording = useMemo(() => {
     const ev = selectedEvent ?? events[0];
     return interpolateRecognitionWording(draftTemplate.wordingTemplate, {
       participant: eventParticipants[0]?.record.fullName || 'Dr. Sarah Jenkins',
-      category: selectedCategory?.name || 'Best Participant',
+      category: previewBestTermLabel || selectedCategory?.name || 'Best Participant',
       event: ev?.title || 'Teacher Professional Development Workshop',
       date: ev?.eventDate || formatLocalDateYmd(new Date()),
       venue: ev?.venue || 'Main Conference Hall',
       topic: ev?.topic || ev?.category || 'Instructional Excellence',
       theme: ev?.theme || '',
-      facilitator: ev?.facilitators || 'Ms. Elena Vance',
+      facilitator:
+        draftTemplate.picPdName.trim() || ev?.facilitators || 'Ms. Elena Vance',
       organizer: branding?.organizationName || 'PRESENZA Academy',
       department:
         eventParticipants[0]?.record.classDepartment || 'Curriculum Team',
     });
   }, [
     draftTemplate.wordingTemplate,
+    draftTemplate.picPdName,
+    previewBestTermLabel,
     selectedEvent,
     events,
     eventParticipants,
@@ -1579,8 +1660,81 @@ export default function AdminRecognitionModule({
               </div>
             </div>
 
-            {/* Logo & Signature Controls */}
+            {/* Best Category for Term 1 – Term 4 */}
             <div className="pt-3 border-t border-slate-200 space-y-3">
+              <div>
+                <div className="text-xs font-bold text-slate-900">
+                  Best Category by Term (Term 1 – Term 4)
+                </div>
+                <p className="text-[11px] text-slate-500 mt-0.5">
+                  Activate a term award ribbon on the certificate template and customize each term&rsquo;s category title.
+                </p>
+              </div>
+
+              <div
+                className="grid grid-cols-5 gap-1 p-1 bg-slate-100 rounded-xl"
+                role="group"
+                aria-label="Best category term selector"
+              >
+                {CERTIFICATE_TERM_OPTIONS.map((opt) => {
+                  const active = draftTemplate.bestTerm === opt.key;
+                  return (
+                    <button
+                      key={opt.key}
+                      type="button"
+                      onClick={() =>
+                        setDraftTemplate((prev) => ({
+                          ...prev,
+                          bestTerm: opt.key as CertificateTermKey,
+                        }))
+                      }
+                      className={`min-h-[34px] px-1.5 py-1 rounded-lg text-[11px] font-semibold transition-colors ${
+                        active
+                          ? 'bg-white text-slate-900 shadow-xs'
+                          : 'text-slate-600 hover:text-slate-900'
+                      }`}
+                    >
+                      {opt.shortLabel}
+                    </button>
+                  );
+                })}
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                {(['term1', 'term2', 'term3', 'term4'] as const).map(
+                  (tKey, idx) => (
+                    <div key={tKey}>
+                      <label
+                        htmlFor={`rec-term-${tKey}`}
+                        className="block text-[11px] font-semibold text-slate-700 mb-1"
+                      >
+                        Term {idx + 1} Category Name
+                      </label>
+                      <input
+                        id={`rec-term-${tKey}`}
+                        type="text"
+                        maxLength={100}
+                        value={draftTemplate.termBestCategories[tKey]}
+                        placeholder={DEFAULT_TERM_BEST_CATEGORIES[tKey]}
+                        onChange={(e) =>
+                          setDraftTemplate((prev) => ({
+                            ...prev,
+                            termBestCategories: {
+                              ...prev.termBestCategories,
+                              [tKey]: e.target.value,
+                            },
+                          }))
+                        }
+                        className="w-full min-h-[36px] px-2.5 py-1 text-xs border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-600"
+                      />
+                    </div>
+                  )
+                )}
+              </div>
+            </div>
+
+            {/* Logo & Native Bottom Signatory Controls */}
+            <div className="pt-3 border-t border-slate-200 space-y-4">
               <input
                 ref={logoUploadRef}
                 type="file"
@@ -1593,15 +1747,28 @@ export default function AdminRecognitionModule({
                 className="hidden"
               />
               <input
-                ref={sigUploadRef}
+                ref={picPdSigUploadRef}
                 type="file"
                 accept="image/png,image/jpeg,image/webp,.png,.jpg,.jpeg,.webp"
                 onChange={(e) => {
                   const file = e.target.files?.[0];
                   e.target.value = '';
-                  if (file) void handleUploadSignature(file);
+                  if (file) void handleUploadSignature('picPd', file);
                 }}
                 className="hidden"
+                aria-label="Upload PIC of Professional Development signature"
+              />
+              <input
+                ref={principalSigUploadRef}
+                type="file"
+                accept="image/png,image/jpeg,image/webp,.png,.jpg,.jpeg,.webp"
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  e.target.value = '';
+                  if (file) void handleUploadSignature('principal', file);
+                }}
+                className="hidden"
+                aria-label="Upload Principal signature"
               />
 
               <div className="flex flex-wrap items-center justify-between gap-2">
@@ -1638,91 +1805,198 @@ export default function AdminRecognitionModule({
                 </div>
               </div>
 
-              <div className="space-y-2">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <span className="text-xs font-semibold text-slate-700">
-                    Authorized Signature
-                  </span>
-                  <div className="flex items-center gap-1.5">
-                    <button
-                      type="button"
-                      onClick={() => sigUploadRef.current?.click()}
-                      className="min-h-[34px] px-2.5 py-1 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 text-xs font-semibold text-slate-700 inline-flex items-center gap-1"
-                    >
-                      <ImagePlus className="w-3.5 h-3.5 text-blue-700" />
-                      <span>Upload</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setShowDrawSig((p) => !p)}
-                      className="min-h-[34px] px-2.5 py-1 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 text-xs font-semibold text-slate-700 inline-flex items-center gap-1"
-                    >
-                      <PenTool className="w-3.5 h-3.5 text-blue-700" />
-                      <span>Draw</span>
-                    </button>
-                    {draftTemplate.signatureDataUrl && (
-                      <button
-                        type="button"
-                        onClick={() =>
-                          setDraftTemplate((prev) => ({
-                            ...prev,
-                            signatureDataUrl: '',
-                          }))
-                        }
-                        className="min-h-[34px] px-2.5 py-1 rounded-lg border border-rose-200 bg-rose-50 text-xs font-semibold text-rose-700"
-                      >
-                        Clear
-                      </button>
-                    )}
-                  </div>
+              <div>
+                <div className="text-xs font-bold text-slate-900">
+                  Bottom Signatories (Native Template)
                 </div>
+                <p className="text-[11px] text-slate-500 mt-0.5">
+                  The bottom of the certificate provides PIC of Professional Development and Principal. Customize their names and upload or draw each signature.
+                </p>
+              </div>
 
-                {showDrawSig && (
-                  <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 space-y-2">
-                    <canvas
-                      ref={drawCanvasRef}
-                      width={360}
-                      height={110}
-                      onPointerDown={handleStartDraw}
-                      onPointerMove={handleMoveDraw}
-                      onPointerUp={handleEndDraw}
-                      onPointerLeave={handleEndDraw}
-                      className="w-full h-24 bg-white border border-slate-300 rounded-lg touch-none cursor-crosshair"
-                    />
-                    <div className="flex items-center justify-end gap-2">
+              {(
+                [
+                  {
+                    role: 'picPd' as const,
+                    heading: '1. PIC of Professional Development',
+                    nameValue: draftTemplate.picPdName,
+                    namePlaceholder: 'e.g., Ms. Elena Vance, M.Ed.',
+                    titleValue: draftTemplate.picPdTitle,
+                    defaultTitle: 'PIC of Professional Development',
+                    signatureUrl: draftTemplate.picPdSignatureDataUrl,
+                    uploadRef: picPdSigUploadRef,
+                    onNameChange: (val: string) =>
+                      setDraftTemplate((prev) => ({ ...prev, picPdName: val })),
+                    onTitleChange: (val: string) =>
+                      setDraftTemplate((prev) => ({
+                        ...prev,
+                        picPdTitle: val,
+                        signatoryLabel: val,
+                      })),
+                    onClearSig: () =>
+                      setDraftTemplate((prev) => ({
+                        ...prev,
+                        picPdSignatureDataUrl: '',
+                        signatureDataUrl: '',
+                      })),
+                  },
+                  {
+                    role: 'principal' as const,
+                    heading: '2. Principal',
+                    nameValue: draftTemplate.principalName,
+                    namePlaceholder: 'e.g., Dr. Ahmad Fauzi',
+                    titleValue: draftTemplate.principalTitle,
+                    defaultTitle: 'Principal',
+                    signatureUrl: draftTemplate.principalSignatureDataUrl,
+                    uploadRef: principalSigUploadRef,
+                    onNameChange: (val: string) =>
+                      setDraftTemplate((prev) => ({
+                        ...prev,
+                        principalName: val,
+                      })),
+                    onTitleChange: (val: string) =>
+                      setDraftTemplate((prev) => ({
+                        ...prev,
+                        principalTitle: val,
+                      })),
+                    onClearSig: () =>
+                      setDraftTemplate((prev) => ({
+                        ...prev,
+                        principalSignatureDataUrl: '',
+                      })),
+                  },
+                ] as const
+              ).map((sig) => (
+                <div
+                  key={sig.role}
+                  className="rounded-xl border border-slate-200 bg-slate-50/70 p-3.5 space-y-2.5"
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="text-xs font-bold text-slate-800">
+                      {sig.heading}
+                    </span>
+                    <div className="flex items-center gap-1.5">
                       <button
                         type="button"
-                        onClick={handleClearDrawCanvas}
-                        className="px-2.5 py-1 rounded-lg border border-slate-300 bg-white text-xs font-semibold text-slate-700"
+                        onClick={() => sig.uploadRef.current?.click()}
+                        className="min-h-[32px] px-2.5 py-1 rounded-lg border border-slate-300 bg-white hover:bg-slate-100 text-[11px] font-semibold text-slate-700 inline-flex items-center gap-1"
                       >
-                        Clear Pad
+                        <ImagePlus className="w-3.5 h-3.5 text-blue-700" />
+                        <span>Upload Signature</span>
                       </button>
                       <button
                         type="button"
-                        onClick={handleApplyDrawnSignature}
-                        className="px-3 py-1 rounded-lg bg-blue-700 text-white text-xs font-semibold"
+                        onClick={() => {
+                          setDrawingRole((prev) =>
+                            prev === sig.role ? null : sig.role
+                          );
+                          window.setTimeout(() => handleClearDrawCanvas(), 0);
+                        }}
+                        className="min-h-[32px] px-2.5 py-1 rounded-lg border border-slate-300 bg-white hover:bg-slate-100 text-[11px] font-semibold text-slate-700 inline-flex items-center gap-1"
                       >
-                        Use Signature
+                        <PenTool className="w-3.5 h-3.5 text-blue-700" />
+                        <span>Draw</span>
                       </button>
+                      {sig.signatureUrl && (
+                        <button
+                          type="button"
+                          onClick={sig.onClearSig}
+                          className="min-h-[32px] px-2 py-1 rounded-lg border border-rose-200 bg-rose-50 text-[11px] font-semibold text-rose-700"
+                        >
+                          Clear
+                        </button>
+                      )}
                     </div>
                   </div>
-                )}
 
-                <input
-                  type="text"
-                  maxLength={120}
-                  value={draftTemplate.signatoryLabel}
-                  onChange={(e) =>
-                    setDraftTemplate((prev) => ({
-                      ...prev,
-                      signatoryLabel: e.target.value,
-                    }))
-                  }
-                  placeholder="Signatory title / label..."
-                  aria-label="Signatory label"
-                  className="w-full min-h-[38px] px-3 py-1.5 text-xs border border-slate-300 rounded-xl"
-                />
-              </div>
+                  {sig.signatureUrl && (
+                    <div className="h-14 rounded-lg border border-dashed border-slate-300 bg-white flex items-center justify-center p-1.5 overflow-hidden">
+                      <img
+                        src={sig.signatureUrl}
+                        alt={`${sig.heading} signature preview`}
+                        className="max-h-full max-w-full object-contain"
+                      />
+                    </div>
+                  )}
+
+                  {drawingRole === sig.role && (
+                    <div className="rounded-lg border border-blue-200 bg-white p-2.5 space-y-2">
+                      <canvas
+                        ref={drawCanvasRef}
+                        width={360}
+                        height={110}
+                        onPointerDown={handleStartDraw}
+                        onPointerMove={handleMoveDraw}
+                        onPointerUp={handleEndDraw}
+                        onPointerLeave={handleEndDraw}
+                        className="w-full h-24 bg-slate-50 border border-slate-300 rounded-md touch-none cursor-crosshair"
+                      />
+                      <div className="flex items-center justify-between gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setDrawingRole(null)}
+                          className="text-[11px] font-semibold text-slate-500 hover:text-slate-900"
+                        >
+                          Cancel
+                        </button>
+                        <div className="flex items-center gap-1.5">
+                          <button
+                            type="button"
+                            onClick={handleClearDrawCanvas}
+                            className="px-2.5 py-1 rounded-md border border-slate-300 bg-white text-[11px] font-semibold text-slate-700"
+                          >
+                            Clear Pad
+                          </button>
+                          <button
+                            type="button"
+                            onClick={handleApplyDrawnSignature}
+                            className="px-3 py-1 rounded-md bg-blue-700 text-white text-[11px] font-semibold"
+                          >
+                            Use Signature
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    <div>
+                      <label
+                        htmlFor={`rec-sig-name-${sig.role}`}
+                        className="block text-[11px] font-semibold text-slate-600 mb-0.5"
+                      >
+                        Custom Name
+                      </label>
+                      <input
+                        id={`rec-sig-name-${sig.role}`}
+                        type="text"
+                        maxLength={120}
+                        value={sig.nameValue}
+                        onChange={(e) => sig.onNameChange(e.target.value)}
+                        placeholder={sig.namePlaceholder}
+                        className="w-full min-h-[36px] px-2.5 py-1 text-xs bg-white border border-slate-300 rounded-lg"
+                      />
+                    </div>
+                    <div>
+                      <label
+                        htmlFor={`rec-sig-title-${sig.role}`}
+                        className="block text-[11px] font-semibold text-slate-600 mb-0.5"
+                      >
+                        Role Title
+                      </label>
+                      <input
+                        id={`rec-sig-title-${sig.role}`}
+                        type="text"
+                        maxLength={120}
+                        value={sig.titleValue}
+                        onChange={(e) => sig.onTitleChange(e.target.value)}
+                        placeholder={sig.defaultTitle}
+                        className="w-full min-h-[36px] px-2.5 py-1 text-xs bg-white border border-slate-300 rounded-lg"
+                      />
+                    </div>
+                  </div>
+                </div>
+              ))}
 
               {/* Field Visibility Toggles */}
               <div className="flex flex-wrap gap-3 pt-1 text-xs font-medium text-slate-700">
@@ -1738,19 +2012,6 @@ export default function AdminRecognitionModule({
                     }
                   />
                   <span>Show Topic/Theme</span>
-                </label>
-                <label className="inline-flex items-center gap-1.5">
-                  <input
-                    type="checkbox"
-                    checked={draftTemplate.showFacilitator}
-                    onChange={(e) =>
-                      setDraftTemplate((prev) => ({
-                        ...prev,
-                        showFacilitator: e.target.checked,
-                      }))
-                    }
-                  />
-                  <span>Show Facilitator</span>
                 </label>
                 <label className="inline-flex items-center gap-1.5">
                   <input
@@ -1860,7 +2121,7 @@ export default function AdminRecognitionModule({
                     borderColor: draftTemplate.accentColor,
                   }}
                 >
-                  {selectedCategory?.name || 'Best Participant'}
+                  {previewRibbonText}
                 </div>
               </div>
 
@@ -1898,57 +2159,56 @@ export default function AdminRecognitionModule({
                 )}
               </div>
 
-              <div className="relative z-10 space-y-2 pb-1">
-                <div className="grid grid-cols-3 gap-3 items-end text-[10px]">
-                  <div>
-                    <div
-                      className="font-bold pb-0.5"
-                      style={{ color: draftTemplate.primaryColor }}
-                    >
-                      {formatLocalDateYmd(new Date())}
-                    </div>
-                    <div className="border-t border-slate-300 pt-1 text-slate-500">
-                      Date Issued
-                    </div>
-                  </div>
+              <div className="relative z-10 space-y-2.5 pb-1">
+                <div className="grid grid-cols-2 gap-8 sm:gap-12 items-end text-[10px] max-w-lg mx-auto">
                   <div className="flex flex-col items-center">
-                    {draftTemplate.signatureDataUrl && (
+                    {draftTemplate.picPdSignatureDataUrl && (
                       <img
-                        src={draftTemplate.signatureDataUrl}
-                        alt="Authorized signature"
-                        className="h-7 object-contain mb-0.5"
+                        src={draftTemplate.picPdSignatureDataUrl}
+                        alt="PIC of Professional Development signature"
+                        className="h-8 object-contain mb-1"
                       />
                     )}
-                    <div
-                      className="w-full border-t border-slate-300 pt-1 font-bold truncate"
-                      style={{ color: draftTemplate.primaryColor }}
-                    >
-                      {draftTemplate.signatoryLabel || 'Authorized Coordinator'}
+                    {draftTemplate.picPdName.trim() && (
+                      <div
+                        className="font-bold pb-0.5 truncate max-w-full"
+                        style={{ color: draftTemplate.primaryColor }}
+                      >
+                        {draftTemplate.picPdName.trim()}
+                      </div>
+                    )}
+                    <div className="w-full border-t border-slate-300 pt-1 text-slate-600 font-medium truncate">
+                      {draftTemplate.picPdTitle.trim() ||
+                        'PIC of Professional Development'}
                     </div>
                   </div>
-                  <div>
-                    {draftTemplate.showFacilitator ? (
-                      <>
-                        <div
-                          className="font-bold pb-0.5 truncate"
-                          style={{ color: draftTemplate.primaryColor }}
-                        >
-                          {selectedEvent?.facilitators?.trim() ||
-                            'Session Facilitator'}
-                        </div>
-                        <div className="border-t border-slate-300 pt-1 text-slate-500">
-                          Facilitator
-                        </div>
-                      </>
-                    ) : (
-                      <div />
+
+                  <div className="flex flex-col items-center">
+                    {draftTemplate.principalSignatureDataUrl && (
+                      <img
+                        src={draftTemplate.principalSignatureDataUrl}
+                        alt="Principal signature"
+                        className="h-8 object-contain mb-1"
+                      />
                     )}
+                    {draftTemplate.principalName.trim() && (
+                      <div
+                        className="font-bold pb-0.5 truncate max-w-full"
+                        style={{ color: draftTemplate.primaryColor }}
+                      >
+                        {draftTemplate.principalName.trim()}
+                      </div>
+                    )}
+                    <div className="w-full border-t border-slate-300 pt-1 text-slate-600 font-medium truncate">
+                      {draftTemplate.principalTitle.trim() || 'Principal'}
+                    </div>
                   </div>
                 </div>
 
                 {draftTemplate.showCertificateId && (
                   <div className="font-mono-tabular text-[9px] text-slate-400">
-                    Certificate ID: PRZ-2026-SAMPLE · Event:{' '}
+                    Certificate ID: PRZ-2026-SAMPLE · Issued:{' '}
+                    {formatLocalDateYmd(new Date())} · Event:{' '}
                     {selectedEvent?.title || 'Workshop Session'}
                   </div>
                 )}
@@ -1981,7 +2241,7 @@ export default function AdminRecognitionModule({
               ) : (
                 <Sparkles className="w-3.5 h-3.5 text-amber-600" />
               )}
-              <span>Restore 10 Default Categories</span>
+              <span>Restore Default &amp; Term 1–4 Categories</span>
             </button>
           </div>
 
@@ -2258,6 +2518,13 @@ export default function AdminRecognitionModule({
                           <span className="inline-flex items-center px-2.5 py-0.5 rounded-md text-xs font-semibold bg-amber-50 text-amber-800 border border-amber-200">
                             {cert.categoryName}
                           </span>
+                          {cert.termCategoryName &&
+                            cert.termCategoryName.toLowerCase() !==
+                              cert.categoryName.toLowerCase() && (
+                              <div className="text-[11px] font-medium text-slate-500 mt-0.5">
+                                {cert.termCategoryName}
+                              </div>
+                            )}
                         </td>
                         <td className="py-3 px-4 text-xs">
                           <div className="font-semibold text-slate-800">

@@ -123,12 +123,27 @@ export type CertificateElementsMap = Record<
   CertificateElementConfig
 >;
 
+export type CertificateTermKey = 'none' | 'term1' | 'term2' | 'term3' | 'term4';
+
+export type TermBestCategoryNames = {
+  term1: string;
+  term2: string;
+  term3: string;
+  term4: string;
+};
+
 export interface CertificateSettings {
   themeId: CertificateThemeId;
   backgroundDataUrl: string;
   backgroundOpacity: number; // 0..100
   facilitatorSignatureDataUrl: string;
   principalSignatureDataUrl: string;
+  picPdName: string;
+  picPdTitle: string;
+  principalName: string;
+  principalTitle: string;
+  bestTerm: CertificateTermKey;
+  termBestCategories: TermBestCategoryNames;
   elements: CertificateElementsMap;
 }
 
@@ -271,6 +286,14 @@ export interface RecognitionTemplateConfig {
   customLogoDataUrl: string;
   signatureDataUrl: string;
   signatoryLabel: string;
+  bestTerm: CertificateTermKey;
+  termBestCategories: TermBestCategoryNames;
+  picPdName: string;
+  picPdTitle: string;
+  picPdSignatureDataUrl: string;
+  principalName: string;
+  principalTitle: string;
+  principalSignatureDataUrl: string;
   showTopic: boolean;
   showFacilitator: boolean;
   showCertificateId: boolean;
@@ -294,6 +317,8 @@ export interface IssuedCertificateRecord {
   participantEmail: string;
   categoryId: string;
   categoryName: string;
+  bestTerm?: CertificateTermKey;
+  termCategoryName?: string;
   issueDate: string; // YYYY-MM-DD
   selectionMethod: 'manual' | 'evaluation';
   orientation: RecognitionOrientation;
@@ -305,6 +330,10 @@ export interface IssuedCertificateRecord {
   accentColor: string;
   paperColor: string;
   signatoryLabel: string;
+  picPdName?: string;
+  picPdTitle?: string;
+  principalName?: string;
+  principalTitle?: string;
   issuedByUid: string;
   issuedByEmail: string;
   createdAt: Timestamp;

@@ -21,9 +21,15 @@ import type {
   AttendanceRecord,
   CertificateElementKey,
   CertificateSettings,
+  CertificateTermKey,
   EventRecord,
   OrganizationBranding,
 } from '../types';
+import {
+  CERTIFICATE_TERM_OPTIONS,
+  DEFAULT_TERM_BEST_CATEGORIES,
+  resolveBestTermLabel,
+} from '../utils/feedbackAndRecognitionDefaults';
 import {
   compressCertificateBackground,
   compressSignatureCanvas,
@@ -115,10 +121,17 @@ export default function CertificateCustomizerModal({
   const previewDate = sampleRecord?.attendanceDate || '2026-11-17';
   const previewTime = sampleRecord?.checkInTime || '07:42:15';
   const previewStatus = sampleRecord?.status || 'On Time';
-  const previewFacilitator =
-    sampleEvent?.facilitators?.trim() || 'Session Facilitator';
-  const previewPrincipal =
-    sampleEvent?.principalName?.trim() || 'School Principal';
+  const previewBestTermLabel = resolveBestTermLabel(
+    draft.bestTerm,
+    draft.termBestCategories
+  );
+  const previewPicPdName =
+    draft.picPdName.trim() || sampleEvent?.facilitators?.trim() || '';
+  const previewPicPdTitle =
+    draft.picPdTitle.trim() || 'PIC of Professional Development';
+  const previewPrincipalName =
+    draft.principalName.trim() || sampleEvent?.principalName?.trim() || '';
+  const previewPrincipalTitle = draft.principalTitle.trim() || 'Principal';
   const previewOrgName = branding?.organizationName?.trim() || 'Your School / Company';
 
   // Canvas pointer dragging on A4 preview
@@ -630,7 +643,9 @@ export default function CertificateCustomizerModal({
                         : 'hover:ring-1 hover:ring-blue-400 z-10'
                     }`}
                   >
-                    RANK #1 · 1ST EARLIEST ARRIVAL
+                    {previewBestTermLabel
+                      ? `${previewBestTermLabel.toUpperCase()} · RANK #1`
+                      : 'RANK #1 · 1ST EARLIEST ARRIVAL'}
                   </div>
                 )}
 
@@ -802,7 +817,7 @@ export default function CertificateCustomizerModal({
                   </div>
                 )}
 
-                {/* 14. Facilitator Block + Signature */}
+                {/* 14. PIC of Professional Development Block + Signature */}
                 {draft.elements.facilitatorBlock.visible && (
                   <div
                     onPointerDown={(e) =>
@@ -812,7 +827,7 @@ export default function CertificateCustomizerModal({
                       left: `${(draft.elements.facilitatorBlock.x / 297) * 100}%`,
                       top: `${(draft.elements.facilitatorBlock.y / 210) * 100}%`,
                       transform: 'translate(-50%, -85%)',
-                      width: '23%',
+                      width: '26%',
                     }}
                     className={`absolute cursor-move px-1 text-center ${
                       selectedKey === 'facilitatorBlock'
@@ -823,19 +838,21 @@ export default function CertificateCustomizerModal({
                     {draft.facilitatorSignatureDataUrl && (
                       <img
                         src={draft.facilitatorSignatureDataUrl}
-                        alt="Facilitator signature"
+                        alt="PIC of Professional Development signature"
                         className="mx-auto mb-0.5 max-h-6 sm:max-h-8 max-w-[78%] object-contain pointer-events-none"
                       />
                     )}
-                    <div
-                      className="text-[clamp(5.5px,0.85vw,9px)] font-bold truncate"
-                      style={{ color: theme.headingHex }}
-                    >
-                      {previewFacilitator}
-                    </div>
+                    {previewPicPdName && (
+                      <div
+                        className="text-[clamp(5.5px,0.85vw,9px)] font-bold truncate"
+                        style={{ color: theme.headingHex }}
+                      >
+                        {previewPicPdName}
+                      </div>
+                    )}
                     <div className="mt-0.5 h-[1px] bg-slate-400 w-full" />
-                    <div className="mt-0.5 text-[clamp(5px,0.75vw,8px)] text-slate-500">
-                      Facilitators
+                    <div className="mt-0.5 text-[clamp(5px,0.72vw,8px)] text-slate-500 truncate">
+                      {previewPicPdTitle}
                     </div>
                   </div>
                 )}
@@ -848,7 +865,7 @@ export default function CertificateCustomizerModal({
                       left: `${(draft.elements.principalBlock.x / 297) * 100}%`,
                       top: `${(draft.elements.principalBlock.y / 210) * 100}%`,
                       transform: 'translate(-50%, -85%)',
-                      width: '23%',
+                      width: '26%',
                     }}
                     className={`absolute cursor-move px-1 text-center ${
                       selectedKey === 'principalBlock'
@@ -863,15 +880,17 @@ export default function CertificateCustomizerModal({
                         className="mx-auto mb-0.5 max-h-6 sm:max-h-8 max-w-[78%] object-contain pointer-events-none"
                       />
                     )}
-                    <div
-                      className="text-[clamp(5.5px,0.85vw,9px)] font-bold truncate"
-                      style={{ color: theme.headingHex }}
-                    >
-                      {previewPrincipal}
-                    </div>
+                    {previewPrincipalName && (
+                      <div
+                        className="text-[clamp(5.5px,0.85vw,9px)] font-bold truncate"
+                        style={{ color: theme.headingHex }}
+                      >
+                        {previewPrincipalName}
+                      </div>
+                    )}
                     <div className="mt-0.5 h-[1px] bg-slate-400 w-full" />
-                    <div className="mt-0.5 text-[clamp(5px,0.75vw,8px)] text-slate-500">
-                      Principal
+                    <div className="mt-0.5 text-[clamp(5px,0.72vw,8px)] text-slate-500 truncate">
+                      {previewPrincipalTitle}
                     </div>
                   </div>
                 )}
@@ -1111,6 +1130,79 @@ export default function CertificateCustomizerModal({
                       />
                     </div>
                   </div>
+
+                  {/* Best Category by Term (Term 1 – Term 4) */}
+                  <div className="rounded-xl border border-slate-200 bg-slate-50/60 p-4 space-y-3">
+                    <div>
+                      <div className="text-xs font-bold uppercase tracking-wide text-slate-800">
+                        Best Category by Term (Term 1 – Term 4)
+                      </div>
+                      <p className="text-[11px] text-slate-500 mt-0.5">
+                        Select an active term to display its Best Category distinction on the certificate and customize each term&rsquo;s title.
+                      </p>
+                    </div>
+
+                    <div
+                      className="grid grid-cols-5 gap-1 p-1 rounded-lg bg-slate-200/70"
+                      role="group"
+                      aria-label="Certificate term selection"
+                    >
+                      {CERTIFICATE_TERM_OPTIONS.map((opt) => {
+                        const active = draft.bestTerm === opt.key;
+                        return (
+                          <button
+                            key={opt.key}
+                            type="button"
+                            onClick={() =>
+                              setDraft((prev) => ({
+                                ...prev,
+                                bestTerm: opt.key as CertificateTermKey,
+                              }))
+                            }
+                            className={`min-h-[32px] px-1.5 py-1 rounded-md text-[11px] font-semibold transition-colors ${
+                              active
+                                ? 'bg-white text-slate-900 shadow-xs'
+                                : 'text-slate-600 hover:text-slate-900'
+                            }`}
+                          >
+                            {opt.shortLabel}
+                          </button>
+                        );
+                      })}
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                      {(['term1', 'term2', 'term3', 'term4'] as const).map(
+                        (tKey, idx) => (
+                          <div key={tKey} className="space-y-1">
+                            <label
+                              htmlFor={`modal-term-${tKey}`}
+                              className="block text-[11px] font-semibold text-slate-700"
+                            >
+                              Term {idx + 1} Best Category Name
+                            </label>
+                            <input
+                              id={`modal-term-${tKey}`}
+                              type="text"
+                              maxLength={100}
+                              value={draft.termBestCategories[tKey]}
+                              placeholder={DEFAULT_TERM_BEST_CATEGORIES[tKey]}
+                              onChange={(e) =>
+                                setDraft((prev) => ({
+                                  ...prev,
+                                  termBestCategories: {
+                                    ...prev.termBestCategories,
+                                    [tKey]: e.target.value,
+                                  },
+                                }))
+                              }
+                              className="w-full min-h-[36px] px-2.5 py-1 text-xs bg-white border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-600"
+                            />
+                          </div>
+                        )
+                      )}
+                    </div>
+                  </div>
                 </div>
               )}
 
@@ -1302,7 +1394,7 @@ export default function CertificateCustomizerModal({
               {activeTab === 'signatures' && (
                 <div className="space-y-4">
                   <p className="text-xs text-slate-600 leading-relaxed">
-                    Attach digital signatures by uploading a transparent PNG/image or drawing directly. Signatures appear cleanly above the Facilitator and Principal lines on every exported certificate.
+                    Customize the names and upload or draw digital signatures for the native bottom signatories: <strong>PIC of Professional Development</strong> and <strong>Principal</strong>.
                   </p>
 
                   <input
@@ -1316,7 +1408,7 @@ export default function CertificateCustomizerModal({
                         void handleUploadSignature('facilitator', file);
                     }}
                     className="hidden"
-                    aria-label="Upload facilitator digital signature"
+                    aria-label="Upload PIC of Professional Development digital signature"
                   />
 
                   <input
@@ -1339,7 +1431,7 @@ export default function CertificateCustomizerModal({
                         <span className="text-xs font-bold text-slate-900">
                           Draw{' '}
                           {drawingFor === 'facilitator'
-                            ? 'Facilitator'
+                            ? 'PIC of Professional Development'
                             : 'Principal'}{' '}
                           Signature
                         </span>
@@ -1383,19 +1475,37 @@ export default function CertificateCustomizerModal({
                     </div>
                   )}
 
-                  {/* Facilitator Signature Card */}
+                  {/* PIC of Professional Development & Principal Cards */}
                   {(
                     [
                       {
                         role: 'facilitator' as const,
-                        title: 'Facilitator Digital Signature',
+                        title: 'PIC of Professional Development',
+                        nameLabel: 'PIC of Professional Development Name',
+                        namePlaceholder: 'e.g., Ms. Elena Vance, M.Ed.',
+                        nameValue: draft.picPdName,
+                        roleTitleValue: draft.picPdTitle,
+                        defaultRoleTitle: 'PIC of Professional Development',
+                        onNameChange: (val: string) =>
+                          setDraft((prev) => ({ ...prev, picPdName: val })),
+                        onTitleChange: (val: string) =>
+                          setDraft((prev) => ({ ...prev, picPdTitle: val })),
                         dataUrl: draft.facilitatorSignatureDataUrl,
                         inputRef: facSigInputRef,
                         blockVisible: draft.elements.facilitatorBlock.visible,
                       },
                       {
                         role: 'principal' as const,
-                        title: 'Principal Digital Signature',
+                        title: 'Principal',
+                        nameLabel: 'Principal Name',
+                        namePlaceholder: 'e.g., Dr. Ahmad Fauzi',
+                        nameValue: draft.principalName,
+                        roleTitleValue: draft.principalTitle,
+                        defaultRoleTitle: 'Principal',
+                        onNameChange: (val: string) =>
+                          setDraft((prev) => ({ ...prev, principalName: val })),
+                        onTitleChange: (val: string) =>
+                          setDraft((prev) => ({ ...prev, principalTitle: val })),
                         dataUrl: draft.principalSignatureDataUrl,
                         inputRef: priSigInputRef,
                         blockVisible: draft.elements.principalBlock.visible,
@@ -1415,6 +1525,43 @@ export default function CertificateCustomizerModal({
                             Block hidden in Elements
                           </span>
                         )}
+                      </div>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                        <div className="space-y-1">
+                          <label
+                            htmlFor={`modal-sig-name-${sig.role}`}
+                            className="block text-[11px] font-semibold text-slate-700"
+                          >
+                            {sig.nameLabel}
+                          </label>
+                          <input
+                            id={`modal-sig-name-${sig.role}`}
+                            type="text"
+                            maxLength={120}
+                            value={sig.nameValue}
+                            placeholder={sig.namePlaceholder}
+                            onChange={(e) => sig.onNameChange(e.target.value)}
+                            className="w-full min-h-[36px] px-2.5 py-1 text-xs bg-white border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-600"
+                          />
+                        </div>
+                        <div className="space-y-1">
+                          <label
+                            htmlFor={`modal-sig-title-${sig.role}`}
+                            className="block text-[11px] font-semibold text-slate-700"
+                          >
+                            Bottom Role Title
+                          </label>
+                          <input
+                            id={`modal-sig-title-${sig.role}`}
+                            type="text"
+                            maxLength={120}
+                            value={sig.roleTitleValue}
+                            placeholder={sig.defaultRoleTitle}
+                            onChange={(e) => sig.onTitleChange(e.target.value)}
+                            className="w-full min-h-[36px] px-2.5 py-1 text-xs bg-white border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-600"
+                          />
+                        </div>
                       </div>
 
                       <div className="h-20 rounded-lg border border-dashed border-slate-300 bg-white flex items-center justify-center p-2 overflow-hidden">
@@ -1439,7 +1586,7 @@ export default function CertificateCustomizerModal({
                           className="min-h-[34px] px-3 py-1.5 rounded-lg border border-slate-300 bg-white hover:bg-slate-100 text-xs font-semibold text-slate-800 inline-flex items-center gap-1.5 disabled:opacity-50"
                         >
                           <Upload className="w-3.5 h-3.5 text-blue-700" />
-                          <span>Upload Image</span>
+                          <span>Upload Signature</span>
                         </button>
                         <button
                           type="button"
