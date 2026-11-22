@@ -16,7 +16,6 @@ import { type User } from 'firebase/auth';
 import {
   collection,
   doc,
-  getDoc,
   onSnapshot,
   query,
   serverTimestamp,
@@ -62,6 +61,17 @@ interface ParticipantCheckInProps {
   onGoToFeedback?: (eventId: string) => void;
   onGoToAdmin?: () => void;
 }
+
+type QrEventNotice =
+  | {
+      kind: 'ended';
+      eventTitle: string;
+      eventDate?: string;
+      venue?: string;
+    }
+  | {
+      kind: 'unavailable';
+    };
 
 const CHECKIN_DEDUPE_STORAGE_KEY = 'presenza_checkin_receipts_v1';
 const ACTIVE_CHECKIN_POINTER_KEY = 'presenza_active_checkin_pointer_v1';
@@ -203,6 +213,12 @@ export default function ParticipantCheckIn({
   const [activeEvents, setActiveEvents] = useState<EventRecord[]>([]);
   const [selectedEvent, setSelectedEvent] = useState<EventRecord | null>(null);
   const [loadingEvents, setLoadingEvents] = useState(true);
+  const [resolvingRequestedEvent, setResolvingRequestedEvent] = useState(() =>
+    Boolean(requestedEventId)
+  );
+  const [qrEventNotice, setQrEventNotice] = useState<QrEventNotice | null>(
+    null
+  );
   const [eventError, setEventError] = useState<string | null>(null);
   const [eventDiagnostic, setEventDiagnostic] =
     useState<DiagnosticErrorDetails | null>(null);
@@ -321,102 +337,95 @@ export default function ParticipantCheckIn({
     return () => unsubscribe();
   }, []);
 
-  // Resolve requestedEventId or default to first active event
+  // Resolve requestedEventId in real time (so closing/removing an event immediately updates QR view) or default to first active event
   useEffect(() => {
-    let cancelled = false;
+    setEventError(null);
+    setEventDiagnostic(null);
 
-    async function resolveEvent() {
-      setEventError(null);
-      setEventDiagnostic(null);
-      if (requestedEventId) {
-        if (!isValidEventIdParam(requestedEventId)) {
-          setSelectedEvent(null);
-          setEventError(
-            `Invalid event identifier in QR link ("${requestedEventId}").`
-          );
-          setEventDiagnostic({
-            title: 'Invalid QR Event Parameter',
-            message: 'The event query parameter contains unsupported characters or length.',
-            failingUrl: window.location.href,
-            consoleError: `Invalid event ID format: "${requestedEventId}"`,
-            component: 'ParticipantCheckIn.resolveEvent',
-          });
-          return;
-        }
-
-        const match = activeEvents.find((ev) => ev.id === requestedEventId);
-        if (match) {
-          setSelectedEvent(match);
-          return;
-        }
-
-        try {
-          const snap = await getDoc(doc(db, 'events', requestedEventId));
-          if (cancelled) return;
-          if (!snap.exists()) {
-            setSelectedEvent(null);
-            setEventError(
-              `This QR code session (${requestedEventId}) was not found or has been removed.`
-            );
-            setEventDiagnostic({
-              title: 'Event Not Found',
-              message: `No event document exists at events/${requestedEventId}.`,
-              failingUrl: window.location.href,
-              firebaseCode: 'not-found',
-              firebaseMessage: `Document events/${requestedEventId} does not exist.`,
-              component: 'ParticipantCheckIn.resolveEvent',
-            });
-          } else {
-            const data = snap.data() as Omit<EventRecord, 'id'>;
-            if (data.status !== 'active') {
-              setSelectedEvent(null);
-              setEventError(
-                `Check-in for "${data.title}" (${data.eventDate}) is currently closed by the organizer.`
-              );
-              setEventDiagnostic({
-                title: 'Session Closed',
-                message: `Event "${data.title}" exists, but status is "${data.status}".`,
-                failingUrl: window.location.href,
-                component: 'ParticipantCheckIn.resolveEvent',
-              });
-            } else {
-              setSelectedEvent({ id: snap.id, ...data });
-            }
-          }
-        } catch (err) {
-          if (!cancelled) {
-            const info = reportFirestoreError(
-              err,
-              OperationType.GET,
-              `events/${requestedEventId}`
-            );
-            setSelectedEvent(null);
-            setEventError(
-              `Unable to load QR session "${requestedEventId}" (${info.code || 'firestore-error'}).`
-            );
-            setEventDiagnostic({
-              title: 'Session Lookup Failed',
-              message: info.error,
-              failingUrl: window.location.href,
-              firebaseCode: info.code || undefined,
-              firebaseMessage: info.error,
-              consoleError: `Firestore GET events/${requestedEventId}: ${info.error}`,
-              component: 'ParticipantCheckIn.resolveEvent',
-            });
-          }
-        }
-      } else {
+    if (!requestedEventId) {
+      setQrEventNotice(null);
+      setResolvingRequestedEvent(false);
+      if (!loadingEvents) {
         setSelectedEvent(activeEvents[0] ?? null);
       }
+      return;
     }
 
-    if (!loadingEvents) {
-      void resolveEvent();
+    if (!isValidEventIdParam(requestedEventId)) {
+      setSelectedEvent(null);
+      setQrEventNotice({ kind: 'unavailable' });
+      setEventError('This event or event name is not available.');
+      setResolvingRequestedEvent(false);
+      return;
     }
 
-    return () => {
-      cancelled = true;
-    };
+    setResolvingRequestedEvent(true);
+    const unsubRequested = onSnapshot(
+      doc(db, 'events', requestedEventId),
+      (snap) => {
+        if (!snap.exists()) {
+          setSelectedEvent(null);
+          setQrEventNotice({ kind: 'unavailable' });
+          setEventError('This event or event name is not available.');
+          setResolvingRequestedEvent(false);
+          return;
+        }
+
+        const data = snap.data() as Omit<EventRecord, 'id'>;
+        const cleanTitle = data.title?.trim() || '';
+
+        if (!cleanTitle) {
+          setSelectedEvent(null);
+          setQrEventNotice({ kind: 'unavailable' });
+          setEventError('This event or event name is not available.');
+          setResolvingRequestedEvent(false);
+          return;
+        }
+
+        if (data.status !== 'active') {
+          setSelectedEvent(null);
+          setQrEventNotice({
+            kind: 'ended',
+            eventTitle: cleanTitle,
+            eventDate: data.eventDate,
+            venue: data.venue,
+          });
+          setEventError(`The event "${cleanTitle}" has ended.`);
+          setResolvingRequestedEvent(false);
+          return;
+        }
+
+        setQrEventNotice(null);
+        setEventError(null);
+        setEventDiagnostic(null);
+        setSelectedEvent({ id: snap.id, ...data });
+        setResolvingRequestedEvent(false);
+      },
+      (err) => {
+        const info = reportFirestoreError(
+          err,
+          OperationType.GET,
+          `events/${requestedEventId}`
+        );
+        setSelectedEvent(null);
+        setQrEventNotice(null);
+        setEventError(
+          `Unable to load QR session "${requestedEventId}" (${info.code || 'firestore-error'}).`
+        );
+        setEventDiagnostic({
+          title: 'Session Lookup Failed',
+          message: info.error,
+          failingUrl: window.location.href,
+          firebaseCode: info.code || undefined,
+          firebaseMessage: info.error,
+          consoleError: `Firestore GET events/${requestedEventId}: ${info.error}`,
+          component: 'ParticipantCheckIn.resolveEvent',
+        });
+        setResolvingRequestedEvent(false);
+      }
+    );
+
+    return () => unsubRequested();
   }, [requestedEventId, activeEvents, loadingEvents]);
 
   // Restore saved check-in confirmation notification when participant returns to Check-In
@@ -1059,9 +1068,119 @@ export default function ParticipantCheckIn({
     );
   }
 
+  if (requestedEventId && resolvingRequestedEvent) {
+    return (
+      <div className="max-w-2xl mx-auto px-4 sm:px-6 py-12">
+        <div className="bg-white border border-slate-200 rounded-2xl p-8 flex items-center justify-center gap-3 text-sm font-medium text-slate-600">
+          <Loader2 className="w-5 h-5 animate-spin text-blue-700" />
+          <span>Checking event status...</span>
+        </div>
+      </div>
+    );
+  }
+
+  if (requestedEventId && qrEventNotice) {
+    return (
+      <div className="max-w-2xl mx-auto px-4 sm:px-6 py-10 sm:py-14">
+        <div
+          role="alert"
+          className="bg-white border border-slate-200 rounded-2xl overflow-hidden"
+        >
+          <div className="px-6 py-6 sm:px-8 border-b border-slate-200 bg-amber-50/70 flex items-start gap-4">
+            <div className="w-11 h-11 rounded-xl bg-amber-100 text-amber-800 flex items-center justify-center shrink-0">
+              {qrEventNotice.kind === 'ended' ? (
+                <Clock className="w-6 h-6" />
+              ) : (
+                <AlertCircle className="w-6 h-6" />
+              )}
+            </div>
+            <div className="min-w-0 space-y-1">
+              <div className="text-xs font-bold uppercase tracking-wider text-amber-800">
+                {qrEventNotice.kind === 'ended'
+                  ? 'Event Ended · Check-In Closed'
+                  : 'QR Link Unavailable'}
+              </div>
+              <h1 className="text-xl sm:text-2xl font-bold text-slate-900 text-balance">
+                {qrEventNotice.kind === 'ended'
+                  ? `${qrEventNotice.eventTitle} has ended`
+                  : 'Event or Name Not Available'}
+              </h1>
+            </div>
+          </div>
+
+          <div className="px-6 py-6 sm:px-8 space-y-5">
+            <p className="text-sm sm:text-base text-slate-700 leading-relaxed">
+              {qrEventNotice.kind === 'ended' ? (
+                <>
+                  The event{' '}
+                  <strong className="font-semibold text-slate-900">
+                    &ldquo;{qrEventNotice.eventTitle}&rdquo;
+                  </strong>{' '}
+                  has ended and attendance check-in is now closed.
+                </>
+              ) : (
+                'This event or event name is not available. The QR code may have been removed, expired, or entered incorrectly.'
+              )}
+            </p>
+
+            {qrEventNotice.kind === 'ended' && (
+              <div className="flex flex-wrap items-center gap-2 text-xs text-slate-600 pt-2 border-t border-slate-100">
+                <span className="font-semibold text-slate-900">
+                  {qrEventNotice.eventTitle}
+                </span>
+                {qrEventNotice.eventDate && (
+                  <>
+                    <span aria-hidden="true">·</span>
+                    <span className="font-mono-tabular">
+                      {qrEventNotice.eventDate}
+                    </span>
+                  </>
+                )}
+                {qrEventNotice.venue && (
+                  <>
+                    <span aria-hidden="true">·</span>
+                    <span className="inline-flex items-center gap-1">
+                      <MapPin className="w-3.5 h-3.5 text-slate-400" />
+                      <span>{qrEventNotice.venue}</span>
+                    </span>
+                  </>
+                )}
+                <span aria-hidden="true">·</span>
+                <span className="font-semibold text-amber-800">Closed</span>
+              </div>
+            )}
+
+            {(activeEvents.length > 0 || onGoToAdmin) && (
+              <div className="pt-2 flex flex-wrap items-center gap-2.5">
+                {activeEvents.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => onSelectEventId(activeEvents[0].id)}
+                    className="min-h-[42px] px-4 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs sm:text-sm font-semibold transition-colors whitespace-nowrap"
+                  >
+                    Switch to Active Session
+                  </button>
+                )}
+                {onGoToAdmin && (
+                  <button
+                    type="button"
+                    onClick={onGoToAdmin}
+                    className="min-h-[42px] px-4 py-2 rounded-xl border border-slate-300 bg-white hover:bg-slate-100 text-slate-800 text-xs sm:text-sm font-semibold transition-colors whitespace-nowrap"
+                  >
+                    Back to Admin Console
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-6 sm:py-10">
-      {/* Notice if URL points to a closed/unknown event or no active sessions exist */}
+      {/* Notice if session lookup encountered a network/permission error */}
       {eventError && (
         <div
           role="alert"

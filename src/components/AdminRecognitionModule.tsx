@@ -5,6 +5,8 @@ import {
   CheckCircle2,
   CheckSquare,
   ChevronDown,
+  ChevronLeft,
+  ChevronRight,
   ChevronUp,
   Download,
   Edit3,
@@ -420,6 +422,7 @@ export default function AdminRecognitionModule({
     () => categories[0]?.id || ''
   );
   const [participantSearch, setParticipantSearch] = useState('');
+  const [participantLogPage, setParticipantLogPage] = useState(1);
   const [searchFocused, setSearchFocused] = useState(false);
   const [chosenRecipients, setChosenRecipients] = useState<ChosenRecipient[]>(
     () => []
@@ -666,6 +669,36 @@ export default function AdminRecognitionModule({
     selectedCategory,
     certificates,
   ]);
+
+  const PARTICIPANT_LOG_PAGE_SIZE = 10;
+
+  useEffect(() => {
+    setParticipantLogPage(1);
+  }, [selectedEventId, participantSearch]);
+
+  const participantLogTotalPages = Math.max(
+    1,
+    Math.ceil(eventParticipants.length / PARTICIPANT_LOG_PAGE_SIZE)
+  );
+  const safeParticipantLogPage = Math.min(
+    participantLogPage,
+    participantLogTotalPages
+  );
+
+  useEffect(() => {
+    if (participantLogPage > participantLogTotalPages) {
+      setParticipantLogPage(participantLogTotalPages);
+    }
+  }, [participantLogPage, participantLogTotalPages]);
+
+  const paginatedEventParticipants = useMemo(() => {
+    const startIndex =
+      (safeParticipantLogPage - 1) * PARTICIPANT_LOG_PAGE_SIZE;
+    return eventParticipants.slice(
+      startIndex,
+      startIndex + PARTICIPANT_LOG_PAGE_SIZE
+    );
+  }, [eventParticipants, safeParticipantLogPage]);
 
   // Unified searchable roster: selected event attendees first, plus participants from other sessions / feedback
   const searchableRoster = useMemo<SearchableRosterParticipant[]>(() => {
@@ -2110,7 +2143,7 @@ export default function AdminRecognitionModule({
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100">
-                      {eventParticipants.map(
+                      {paginatedEventParticipants.map(
                         ({
                           record,
                           arrivalRank,
@@ -2255,6 +2288,63 @@ export default function AdminRecognitionModule({
                       )}
                     </tbody>
                   </table>
+
+                  <div className="px-5 py-3.5 border-t border-slate-200 bg-slate-50/70 flex flex-wrap items-center justify-between gap-3">
+                    <div className="text-xs text-slate-600 font-mono-tabular">
+                      Showing{' '}
+                      <span className="font-semibold text-slate-900">
+                        {(safeParticipantLogPage - 1) *
+                          PARTICIPANT_LOG_PAGE_SIZE +
+                          1}
+                        &ndash;
+                        {Math.min(
+                          safeParticipantLogPage * PARTICIPANT_LOG_PAGE_SIZE,
+                          eventParticipants.length
+                        )}
+                      </span>{' '}
+                      of{' '}
+                      <span className="font-semibold text-slate-900">
+                        {eventParticipants.length}
+                      </span>{' '}
+                      participants
+                      <span aria-hidden="true" className="mx-2 text-slate-300">
+                        ·
+                      </span>
+                      <span>
+                        Page {safeParticipantLogPage} of{' '}
+                        {participantLogTotalPages}
+                      </span>
+                    </div>
+
+                    <div className="flex items-center gap-2 shrink-0">
+                      <button
+                        type="button"
+                        disabled={safeParticipantLogPage <= 1}
+                        onClick={() =>
+                          setParticipantLogPage((p) => Math.max(1, p - 1))
+                        }
+                        className="min-h-[38px] px-3.5 py-1.5 rounded-xl border border-slate-300 bg-white hover:bg-slate-100 text-slate-800 text-xs font-semibold inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors disabled:opacity-45 disabled:cursor-not-allowed"
+                      >
+                        <ChevronLeft className="w-3.5 h-3.5" />
+                        <span>Previous</span>
+                      </button>
+                      <button
+                        type="button"
+                        disabled={
+                          safeParticipantLogPage >= participantLogTotalPages
+                        }
+                        onClick={() =>
+                          setParticipantLogPage((p) =>
+                            Math.min(participantLogTotalPages, p + 1)
+                          )
+                        }
+                        className="min-h-[38px] px-3.5 py-1.5 rounded-xl border border-slate-300 bg-white hover:bg-slate-100 text-slate-800 text-xs font-semibold inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors disabled:opacity-45 disabled:cursor-not-allowed"
+                      >
+                        <span>Next</span>
+                        <ChevronRight className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  </div>
                 </div>
               )}
             </section>
