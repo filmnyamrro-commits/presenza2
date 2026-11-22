@@ -21,6 +21,7 @@ import {
   Square,
   Star,
   Trash2,
+  UserCheck,
   UserPlus,
   Users,
   X,
@@ -131,6 +132,53 @@ function inferThemeIdFromColors(
       p.accentColor.toLowerCase() === accentColor.toLowerCase()
   );
   return matched ? matched.themeId : fallback;
+}
+
+const VALID_EMAIL_REGEX = /^[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}$/;
+
+interface ChosenRecipient {
+  key: string;
+  fullName: string;
+  classDepartment: string;
+  participantEmail: string;
+  attendanceId: string;
+  photoDataUrl?: string;
+  source: 'event-attendance' | 'roster-search' | 'manual';
+  sourceLabel?: string;
+}
+
+interface SearchableRosterParticipant {
+  rosterKey: string;
+  fullName: string;
+  classDepartment: string;
+  participantEmail: string;
+  attendanceId: string;
+  photoDataUrl?: string;
+  source: 'event-attendance' | 'roster-search';
+  eventLabel: string;
+  inSelectedEvent: boolean;
+  arrivalRank?: number;
+  alreadyIssued: boolean;
+}
+
+function normalizeRecipientKey(name: string, email?: string): string {
+  const cleanEmail = (email || '').trim().toLowerCase();
+  if (cleanEmail) return `email:${cleanEmail}`;
+  return `name:${name.trim().toLowerCase().replace(/\s+/g, ' ')}`;
+}
+
+function parseManualRecipientNames(raw: string): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const part of raw.split(/[\n,;]+/)) {
+    const clean = part.trim().replace(/\s+/g, ' ').slice(0, 100);
+    if (clean.length < 2) continue;
+    const key = clean.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(clean);
+  }
+  return result;
 }
 
 interface RecognitionCertificateCanvasProps {
@@ -369,12 +417,13 @@ export default function AdminRecognitionModule({
     () => categories[0]?.id || ''
   );
   const [participantSearch, setParticipantSearch] = useState('');
-  const [selectedAttendanceIds, setSelectedAttendanceIds] = useState<Set<string>>(
-    () => new Set()
+  const [searchFocused, setSearchFocused] = useState(false);
+  const [chosenRecipients, setChosenRecipients] = useState<ChosenRecipient[]>(
+    () => []
   );
 
-  // Manual nominee addition
-  const [customNomineeName, setCustomNomineeName] = useState('');
+  // Manual nominee addition (supports typing one or multiple names)
+  const [manualNamesInput, setManualNamesInput] = useState('');
   const [customNomineeDept, setCustomNomineeDept] = useState('');
   const [customNomineeEmail, setCustomNomineeEmail] = useState('');
 
@@ -603,6 +652,150 @@ export default function AdminRecognitionModule({
     certificates,
   ]);
 
+  // Unified searchable roster: selected event attendees first, plus participants from other sessions / feedback
+  const searchableRoster = useMemo<SearchableRosterParticipant[]>(() => {
+    if (!selectedEvent) return [];
+    const map = new Map<string, SearchableRosterParticipant>();
+
+    const currentEventAttendances = attendances.filter(
+      (a) => a.eventId === selectedEvent.id
+    );
+    currentEventAttendances.forEach((rec, idx) => {
+      const rKey = normalizeRecipientKey(rec.fullName, rec.participantEmail);
+      const dedupeKey = selectedCategory
+        ? buildCertificateDedupeKey(
+            selectedEvent.id,
+            selectedCategory.id,
+            rec.fullName,
+            rec.participantEmail
+          )
+        : '';
+      const alreadyIssued = dedupeKey
+        ? certificates.some((c) => c.dedupeKey === dedupeKey)
+        : false;
+      if (!map.has(rKey)) {
+        map.set(rKey, {
+          rosterKey: rKey,
+          fullName: rec.fullName,
+          classDepartment: rec.classDepartment,
+          participantEmail: rec.participantEmail || '',
+          attendanceId: rec.id,
+          photoDataUrl: rec.photoDataUrl,
+          source: 'event-attendance',
+          eventLabel: `Checked In (#${idx + 1})`,
+          inSelectedEvent: true,
+          arrivalRank: idx + 1,
+          alreadyIssued,
+        });
+      }
+    });
+
+    for (const rec of attendances) {
+      if (rec.eventId === selectedEvent.id) continue;
+      const rKey = normalizeRecipientKey(rec.fullName, rec.participantEmail);
+      if (map.has(rKey)) continue;
+      const dedupeKey = selectedCategory
+        ? buildCertificateDedupeKey(
+            selectedEvent.id,
+            selectedCategory.id,
+            rec.fullName,
+            rec.participantEmail
+          )
+        : '';
+      const alreadyIssued = dedupeKey
+        ? certificates.some((c) => c.dedupeKey === dedupeKey)
+        : false;
+      map.set(rKey, {
+        rosterKey: rKey,
+        fullName: rec.fullName,
+        classDepartment: rec.classDepartment,
+        participantEmail: rec.participantEmail || '',
+        attendanceId: '',
+        photoDataUrl: rec.photoDataUrl,
+        source: 'roster-search',
+        eventLabel: rec.eventName || 'Previous Event',
+        inSelectedEvent: false,
+        alreadyIssued,
+      });
+    }
+
+    for (const sub of feedbackSubmissions) {
+      const name = sub.participantName?.trim();
+      if (!name || name.length < 2) continue;
+      const rKey = normalizeRecipientKey(name, sub.participantEmail);
+      if (map.has(rKey)) continue;
+      const dedupeKey = selectedCategory
+        ? buildCertificateDedupeKey(
+            selectedEvent.id,
+            selectedCategory.id,
+            name,
+            sub.participantEmail
+          )
+        : '';
+      const alreadyIssued = dedupeKey
+        ? certificates.some((c) => c.dedupeKey === dedupeKey)
+        : false;
+      map.set(rKey, {
+        rosterKey: rKey,
+        fullName: name,
+        classDepartment: sub.participantDepartment?.trim() || '',
+        participantEmail: sub.participantEmail || '',
+        attendanceId: '',
+        source: 'roster-search',
+        eventLabel: sub.eventTitle || 'Feedback Participant',
+        inSelectedEvent: sub.eventId === selectedEvent.id,
+        alreadyIssued,
+      });
+    }
+
+    return Array.from(map.values());
+  }, [selectedEvent, attendances, feedbackSubmissions, selectedCategory, certificates]);
+
+  const searchQuickMatches = useMemo(() => {
+    const q = participantSearch.trim().toLowerCase();
+    if (!q) return searchableRoster.slice(0, 8);
+    return searchableRoster
+      .filter((item) => {
+        const hay =
+          `${item.fullName} ${item.classDepartment} ${item.participantEmail} ${item.eventLabel}`.toLowerCase();
+        return hay.includes(q);
+      })
+      .slice(0, 12);
+  }, [searchableRoster, participantSearch]);
+
+  const chosenRecipientKeys = useMemo(
+    () => new Set(chosenRecipients.map((r) => r.key)),
+    [chosenRecipients]
+  );
+
+  const chosenStatusList = useMemo(() => {
+    if (!selectedEvent) return [];
+    return chosenRecipients.map((item) => {
+      const dedupeKey = selectedCategory
+        ? buildCertificateDedupeKey(
+            selectedEvent.id,
+            selectedCategory.id,
+            item.fullName,
+            item.participantEmail
+          )
+        : '';
+      const alreadyIssued = dedupeKey
+        ? certificates.some((c) => c.dedupeKey === dedupeKey)
+        : false;
+      return { ...item, alreadyIssued };
+    });
+  }, [chosenRecipients, selectedEvent, selectedCategory, certificates]);
+
+  const eligibleChosenCount = useMemo(
+    () => chosenStatusList.filter((c) => !c.alreadyIssued).length,
+    [chosenStatusList]
+  );
+
+  const parsedManualNames = useMemo(
+    () => parseManualRecipientNames(manualNamesInput),
+    [manualNamesInput]
+  );
+
   // Certificates scoped to the currently chosen event — dynamically aligned with live categories & studio settings
   const eventCertificates = useMemo(() => {
     if (!selectedEvent) return [];
@@ -665,33 +858,79 @@ export default function AdminRecognitionModule({
     );
   }, [filteredEventRecapCertificates, selectedCertIds]);
 
-  const toggleAttendanceSelection = (id: string) => {
-    setSelectedAttendanceIds((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
+  const toggleRecipientInQueue = (candidate: ChosenRecipient) => {
+    setIssueError(null);
+    setChosenRecipients((prev) => {
+      const exists = prev.some((r) => r.key === candidate.key);
+      if (exists) {
+        return prev.filter((r) => r.key !== candidate.key);
+      }
+      return [...prev, candidate];
     });
   };
 
-  // Issue single or bulk certificates for selected attendance participants
-  const handleIssueSelectedCertificates = async () => {
+  const toggleAttendanceRecord = (rec: AttendanceRecord) => {
+    const key = normalizeRecipientKey(rec.fullName, rec.participantEmail);
+    toggleRecipientInQueue({
+      key,
+      fullName: rec.fullName,
+      classDepartment: rec.classDepartment,
+      participantEmail: rec.participantEmail || '',
+      attendanceId: rec.id,
+      photoDataUrl: rec.photoDataUrl,
+      source: 'event-attendance',
+      sourceLabel: 'Checked In',
+    });
+  };
+
+  const toggleRosterCandidate = (item: SearchableRosterParticipant) => {
+    if (item.alreadyIssued) return;
+    toggleRecipientInQueue({
+      key: item.rosterKey,
+      fullName: item.fullName,
+      classDepartment: item.classDepartment,
+      participantEmail: item.participantEmail,
+      attendanceId: item.attendanceId,
+      photoDataUrl: item.photoDataUrl,
+      source: item.source,
+      sourceLabel: item.eventLabel,
+    });
+  };
+
+  const removeChosenRecipient = (key: string) => {
+    setChosenRecipients((prev) => prev.filter((r) => r.key !== key));
+  };
+
+  const issueCertificatesBatch = async (recipients: ChosenRecipient[]) => {
     if (!selectedEvent || !selectedCategory) return;
     setIssueError(null);
     setIssueSuccess(null);
 
-    const chosen = eventParticipants.filter((item) =>
-      selectedAttendanceIds.has(item.record.id)
-    );
-    if (chosen.length === 0) {
-      setIssueError('Select at least one participant checkbox first.');
+    if (recipients.length === 0) {
+      setIssueError(
+        'Search and click participant names or manually type at least one name first.'
+      );
       return;
     }
 
-    const toCreate = chosen.filter((item) => !item.alreadyIssued);
+    const dedupedByKey = new Map<string, ChosenRecipient>();
+    for (const r of recipients) {
+      if (!dedupedByKey.has(r.key)) dedupedByKey.set(r.key, r);
+    }
+
+    const toCreate = Array.from(dedupedByKey.values()).filter((item) => {
+      const dKey = buildCertificateDedupeKey(
+        selectedEvent.id,
+        selectedCategory.id,
+        item.fullName,
+        item.participantEmail
+      );
+      return !certificates.some((c) => c.dedupeKey === dKey);
+    });
+
     if (toCreate.length === 0) {
       setIssueError(
-        `All selected participants already received "${selectedCategory.name}" for this event.`
+        `All chosen participants already received "${selectedCategory.name}" for this event.`
       );
       return;
     }
@@ -736,19 +975,24 @@ export default function AdminRecognitionModule({
         const slice = toCreate.slice(i, i + CHUNK);
         const batch = writeBatch(db);
         for (const item of slice) {
-          const rec = item.record;
+          const cleanName = item.fullName.trim().slice(0, 100);
+          const cleanDept = item.classDepartment.trim().slice(0, 100);
+          const rawEmail = item.participantEmail
+            ? normalizeAdminEmail(item.participantEmail).slice(0, 128)
+            : '';
+          const cleanEmail = VALID_EMAIL_REGEX.test(rawEmail) ? rawEmail : '';
           const dedupeKey = buildCertificateDedupeKey(
             selectedEvent.id,
             selectedCategory.id,
-            rec.fullName,
-            rec.participantEmail
+            cleanName,
+            cleanEmail
           );
           const certDocId = buildCertificateDocId(dedupeKey);
           const certNumber = generateCertificateNumber();
           const wording = interpolateRecognitionWording(
             templateConfig.wordingTemplate,
             {
-              participant: rec.fullName,
+              participant: cleanName,
               category: selectedCategory.name,
               event: selectedEvent.title,
               date: eventDateVal,
@@ -757,7 +1001,7 @@ export default function AdminRecognitionModule({
               theme: eventThemeVal,
               facilitator: picPdNameVal || facilitatorsVal,
               organizer: organizerName,
-              department: rec.classDepartment,
+              department: cleanDept,
             }
           ).slice(0, 700);
 
@@ -772,18 +1016,19 @@ export default function AdminRecognitionModule({
             eventTopic: eventTopicVal,
             facilitators: facilitatorsVal,
             organizerName,
-            attendanceId: rec.id,
-            participantName: rec.fullName.slice(0, 100),
-            participantDepartment: rec.classDepartment.slice(0, 100),
-            participantEmail: rec.participantEmail
-              ? normalizeAdminEmail(rec.participantEmail).slice(0, 128)
-              : '',
+            attendanceId: item.attendanceId || '',
+            participantName: cleanName,
+            participantDepartment: cleanDept,
+            participantEmail: cleanEmail,
             categoryId: selectedCategory.id,
             categoryName: selectedCategory.name.slice(0, 100),
             bestTerm: templateConfig.bestTerm,
             termCategoryName: activeTermCategory,
             issueDate: todayYmd,
-            selectionMethod: selectionMode,
+            selectionMethod:
+              item.source === 'event-attendance' && selectionMode === 'evaluation'
+                ? 'evaluation'
+                : 'manual',
             orientation: templateConfig.orientation,
             certificateTitle: templateConfig.title.slice(0, 120),
             certificateSubtitle: templateConfig.subtitle.slice(0, 140),
@@ -806,8 +1051,8 @@ export default function AdminRecognitionModule({
         await batch.commit();
       }
 
-      setSelectedAttendanceIds(new Set());
-      const skipped = chosen.length - createdCount;
+      setChosenRecipients([]);
+      const skipped = dedupedByKey.size - createdCount;
       setIssueSuccess(
         `Issued ${createdCount} certificate${createdCount === 1 ? '' : 's'} for "${selectedCategory.name}"${
           skipped > 0 ? ` (${skipped} duplicate skipped)` : ''
@@ -823,140 +1068,90 @@ export default function AdminRecognitionModule({
     }
   };
 
-  // Issue single manual certificate for someone not in attendance table
-  const handleIssueCustomNominee = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!selectedEvent || !selectedCategory) return;
+  const handleIssueSelectedCertificates = async () => {
+    await issueCertificatesBatch(chosenRecipients);
+  };
+
+  const buildManualCandidatesFromInputs = (): ChosenRecipient[] | null => {
+    const names = parseManualRecipientNames(manualNamesInput);
+    if (names.length === 0) {
+      setIssueError(
+        'Type at least one participant name (minimum 2 characters). Separate multiple names with commas or new lines.'
+      );
+      return null;
+    }
+
+    const dept = customNomineeDept.trim().slice(0, 100);
+    const rawEmail = customNomineeEmail.trim().toLowerCase().slice(0, 128);
+    if (names.length === 1 && rawEmail && !VALID_EMAIL_REGEX.test(rawEmail)) {
+      setIssueError('Enter a valid email address or leave email blank.');
+      return null;
+    }
+
+    return names.map((name) => {
+      const emailForRow = names.length === 1 ? rawEmail : '';
+      return {
+        key: normalizeRecipientKey(name, emailForRow),
+        fullName: name,
+        classDepartment: dept,
+        participantEmail: emailForRow,
+        attendanceId: '',
+        source: 'manual' as const,
+        sourceLabel: 'Typed Manually',
+      };
+    });
+  };
+
+  const handleAddManualNamesToQueue = () => {
     setIssueError(null);
     setIssueSuccess(null);
+    const candidates = buildManualCandidatesFromInputs();
+    if (!candidates) return;
 
-    const name = customNomineeName.trim().slice(0, 100);
-    const dept = customNomineeDept.trim().slice(0, 100);
-    const email = customNomineeEmail.trim().toLowerCase().slice(0, 128);
-    if (name.length < 2) {
-      setIssueError('Enter at least 2 characters for the recipient name.');
-      return;
-    }
+    setChosenRecipients((prev) => {
+      const existing = new Set(prev.map((p) => p.key));
+      const additions = candidates.filter((c) => !existing.has(c.key));
+      return [...prev, ...additions];
+    });
+    setManualNamesInput('');
+    setCustomNomineeDept('');
+    setCustomNomineeEmail('');
+  };
 
-    const dedupeKey = buildCertificateDedupeKey(
-      selectedEvent.id,
-      selectedCategory.id,
-      name,
-      email
-    );
-    if (certificates.some((c) => c.dedupeKey === dedupeKey)) {
-      setIssueError(
-        `${name} already received "${selectedCategory.name}" for this event.`
-      );
-      return;
-    }
+  const handleAddAndIssueManualNominees = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setIssueError(null);
+    setIssueSuccess(null);
+    const candidates = buildManualCandidatesFromInputs();
+    if (!candidates) return;
 
-    setIssuing(true);
-    const todayYmd = formatLocalDateYmd(new Date());
-    const eventDateVal = /^\d{4}-\d{2}-\d{2}$/.test(selectedEvent.eventDate)
-      ? selectedEvent.eventDate
-      : todayYmd;
-    const organizerName = (
-      branding?.organizationName?.trim() || 'PRESENZA'
-    ).slice(0, 120);
-    const eventTopicVal = (
-      selectedEvent.topic?.trim() ||
-      selectedEvent.category ||
-      ''
-    ).slice(0, 200);
-    const eventThemeVal = (selectedEvent.theme?.trim() || '').slice(0, 120);
-    const facilitatorsVal = (selectedEvent.facilitators?.trim() || '').slice(
-      0,
-      200
-    );
-    const certDocId = buildCertificateDocId(dedupeKey);
-    const certNumber = generateCertificateNumber();
+    await issueCertificatesBatch(candidates);
+    setManualNamesInput('');
+    setCustomNomineeDept('');
+    setCustomNomineeEmail('');
+  };
 
-    const activeTermCategory = resolveBestTermLabel(
-      templateConfig.bestTerm,
-      templateConfig.termBestCategories
-    ).slice(0, 100);
-    const picPdNameVal = templateConfig.picPdName.trim().slice(0, 120);
-    const picPdTitleVal = (
-      templateConfig.picPdTitle.trim() || 'PIC of Professional Development'
-    ).slice(0, 120);
-    const principalNameVal = templateConfig.principalName.trim().slice(0, 120);
-    const principalTitleVal = (
-      templateConfig.principalTitle.trim() || 'Principal'
-    ).slice(0, 120);
-
-    const wording = interpolateRecognitionWording(
-      templateConfig.wordingTemplate,
-      {
-        participant: name,
-        category: selectedCategory.name,
-        event: selectedEvent.title,
-        date: eventDateVal,
-        venue: selectedEvent.venue,
-        topic: eventTopicVal,
-        theme: eventThemeVal,
-        facilitator: picPdNameVal || facilitatorsVal,
-        organizer: organizerName,
-        department: dept,
-      }
-    ).slice(0, 700);
-
-    try {
-      await setDoc(doc(db, 'certificates', certDocId), {
-        certificateNumber: certNumber,
-        dedupeKey,
-        eventId: selectedEvent.id,
-        eventTitle: selectedEvent.title.slice(0, 140),
-        eventDate: eventDateVal,
-        eventVenue: (selectedEvent.venue || '').slice(0, 120),
-        eventTheme: eventThemeVal,
-        eventTopic: eventTopicVal,
-        facilitators: facilitatorsVal,
-        organizerName,
-        attendanceId: '',
-        participantName: name,
-        participantDepartment: dept,
-        participantEmail: email,
-        categoryId: selectedCategory.id,
-        categoryName: selectedCategory.name.slice(0, 100),
-        bestTerm: templateConfig.bestTerm,
-        termCategoryName: activeTermCategory,
-        issueDate: todayYmd,
-        selectionMethod: 'manual',
-        orientation: templateConfig.orientation,
-        certificateTitle: templateConfig.title.slice(0, 120),
-        certificateSubtitle: templateConfig.subtitle.slice(0, 140),
-        wordingText: wording,
-        fontFamily: templateConfig.fontFamily,
-        primaryColor: templateConfig.primaryColor,
-        accentColor: templateConfig.accentColor,
-        paperColor: templateConfig.paperColor,
-        signatoryLabel: picPdTitleVal,
-        picPdName: picPdNameVal,
-        picPdTitle: picPdTitleVal,
-        principalName: principalNameVal,
-        principalTitle: principalTitleVal,
-        issuedByUid: user.uid,
-        issuedByEmail: normalizeAdminEmail(user.email || ''),
-        createdAt: serverTimestamp(),
-      });
-
-      setCustomNomineeName('');
-      setCustomNomineeDept('');
-      setCustomNomineeEmail('');
-      setIssueSuccess(
-        `Issued certificate ${certNumber} to ${name} (${selectedCategory.name}).`
-      );
-    } catch (error) {
-      setIssueError('Failed to issue certificate. Please check all fields.');
-      handleFirestoreError(
-        error,
-        OperationType.CREATE,
-        `certificates/${certDocId}`
-      );
-    } finally {
-      setIssuing(false);
-    }
+  const handleQuickAddSearchQueryAsManual = () => {
+    const clean = participantSearch.trim().replace(/\s+/g, ' ').slice(0, 100);
+    if (clean.length < 2) return;
+    const key = normalizeRecipientKey(clean);
+    setChosenRecipients((prev) => {
+      if (prev.some((p) => p.key === key)) return prev;
+      return [
+        ...prev,
+        {
+          key,
+          fullName: clean,
+          classDepartment: '',
+          participantEmail: '',
+          attendanceId: '',
+          source: 'manual',
+          sourceLabel: 'Typed Manually',
+        },
+      ];
+    });
+    setParticipantSearch('');
+    setSearchFocused(false);
   };
 
   // Recognition Categories CRUD (in Certificate Studio)
@@ -1356,7 +1551,7 @@ export default function AdminRecognitionModule({
                   value={selectedEventId}
                   onChange={(e) => {
                     setSelectedEventId(e.target.value);
-                    setSelectedAttendanceIds(new Set());
+                    setChosenRecipients([]);
                     setSelectedCertIds(new Set());
                     setRecapCategoryFilter('all');
                     setRecapSearch('');
@@ -1479,14 +1674,14 @@ export default function AdminRecognitionModule({
             )}
           </section>
 
-          {/* B. Participant Selection & Issuing */}
+          {/* B. Participant Selection & Issuing (Search & Click OR Manually Type Names) */}
           {selectedEvent ? (
             <section className="bg-white border border-slate-200 rounded-2xl overflow-hidden">
               <div className="px-6 py-4 border-b border-slate-200 flex flex-col lg:flex-row lg:items-center justify-between gap-4">
                 <div>
                   <div className="flex flex-wrap items-center gap-2.5">
                     <h3 className="text-base font-bold text-slate-900">
-                      Select Recipients for Award
+                      Choose Best Participants &amp; Recipients
                     </h3>
                     <div
                       className="inline-flex rounded-lg border border-slate-200 bg-slate-100 p-0.5"
@@ -1502,7 +1697,7 @@ export default function AdminRecognitionModule({
                             : 'text-slate-600 hover:text-slate-900'
                         }`}
                       >
-                        Manual Selection
+                        Search &amp; Manual Entry
                       </button>
                       <button
                         type="button"
@@ -1519,25 +1714,15 @@ export default function AdminRecognitionModule({
                   </div>
                   <p className="text-xs text-slate-500 mt-1">
                     {selectionMode === 'evaluation'
-                      ? 'Review check-in timeliness, arrival rank, and participant evaluation comments before issuing awards.'
-                      : 'Search checked-in attendees and select participants to award recognition certificates.'}
+                      ? 'Review check-in timeliness, arrival rank, and evaluation notes, then click names or type recipients manually.'
+                      : 'Search and click participant names below, or manually type one or more names to award this category.'}
                   </p>
                 </div>
 
-                <div className="flex flex-wrap items-center gap-2.5">
-                  <div className="relative min-w-[200px]">
-                    <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
-                    <input
-                      type="search"
-                      value={participantSearch}
-                      onChange={(e) => setParticipantSearch(e.target.value)}
-                      placeholder="Search attendance list..."
-                      className="w-full min-h-[40px] pl-9 pr-3 py-1.5 text-xs bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-600"
-                    />
-                  </div>
+                <div className="flex flex-wrap items-center gap-2.5 shrink-0">
                   <button
                     type="button"
-                    disabled={issuing || selectedAttendanceIds.size === 0}
+                    disabled={issuing || eligibleChosenCount === 0}
                     onClick={() => void handleIssueSelectedCertificates()}
                     className="min-h-[40px] px-4 py-2 rounded-xl bg-amber-600 hover:bg-amber-700 text-white text-xs font-semibold inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 disabled:opacity-50"
                   >
@@ -1547,11 +1732,298 @@ export default function AdminRecognitionModule({
                       <FileCheck2 className="w-4 h-4" />
                     )}
                     <span>
-                      Issue Selected ({selectedAttendanceIds.size})
+                      Issue Selected ({eligibleChosenCount})
                     </span>
                   </button>
                 </div>
               </div>
+
+              {/* Dual Chooser Panel: 1) Search & Click Name | 2) Manually Type Names */}
+              <div className="px-6 py-5 bg-slate-50/70 border-b border-slate-200 grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
+                {/* 1. Search & Click Participant Name */}
+                <div className="lg:col-span-6 space-y-2.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <label
+                      htmlFor="rec-participant-search"
+                      className="text-xs font-bold text-slate-900 inline-flex items-center gap-1.5"
+                    >
+                      <Search className="w-3.5 h-3.5 text-blue-700" />
+                      <span>1. Search &amp; Click Participant Name</span>
+                    </label>
+                    <span className="font-mono-tabular text-[11px] text-slate-500">
+                      {searchableRoster.length} recorded
+                    </span>
+                  </div>
+
+                  <div className="relative">
+                    <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                    <input
+                      id="rec-participant-search"
+                      type="search"
+                      value={participantSearch}
+                      onFocus={() => setSearchFocused(true)}
+                      onBlur={() => {
+                        window.setTimeout(() => setSearchFocused(false), 180);
+                      }}
+                      onChange={(e) => {
+                        setParticipantSearch(e.target.value);
+                        setSearchFocused(true);
+                      }}
+                      placeholder="Search participant name, class, or email — click a name to choose..."
+                      className="w-full min-h-[42px] pl-9 pr-3 py-2 text-xs bg-white border border-slate-300 rounded-xl text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-600"
+                    />
+                  </div>
+
+                  {/* Clickable Quick-Pick Search Results */}
+                  {(searchFocused || participantSearch.trim().length > 0) && (
+                    <div className="rounded-xl border border-slate-200 bg-white overflow-hidden divide-y divide-slate-100 max-h-60 overflow-y-auto">
+                      {searchQuickMatches.length > 0 ? (
+                        searchQuickMatches.map((item) => {
+                          const isChosen = chosenRecipientKeys.has(item.rosterKey);
+                          return (
+                            <button
+                              key={item.rosterKey}
+                              type="button"
+                              disabled={item.alreadyIssued}
+                              onMouseDown={(e) => e.preventDefault()}
+                              onClick={() => toggleRosterCandidate(item)}
+                              className={`w-full px-3.5 py-2.5 text-left flex items-center justify-between gap-3 transition-colors ${
+                                item.alreadyIssued
+                                  ? 'bg-slate-50 opacity-65 cursor-not-allowed'
+                                  : isChosen
+                                  ? 'bg-amber-50 hover:bg-amber-100/70'
+                                  : 'hover:bg-slate-50'
+                              }`}
+                            >
+                              <div className="flex items-center gap-2.5 min-w-0">
+                                {item.photoDataUrl ? (
+                                  <img
+                                    src={item.photoDataUrl}
+                                    alt={item.fullName}
+                                    className="w-7 h-7 rounded-full object-cover border border-slate-200 shrink-0"
+                                  />
+                                ) : (
+                                  <div className="w-7 h-7 rounded-full bg-slate-100 border border-slate-200 flex items-center justify-center text-[11px] font-bold text-slate-600 shrink-0">
+                                    {item.fullName.charAt(0).toUpperCase()}
+                                  </div>
+                                )}
+                                <div className="min-w-0">
+                                  <div className="text-xs font-bold text-slate-900 truncate">
+                                    {item.fullName}
+                                  </div>
+                                  <div className="text-[11px] text-slate-500 truncate">
+                                    {[item.classDepartment, item.eventLabel]
+                                      .filter(Boolean)
+                                      .join(' · ')}
+                                  </div>
+                                </div>
+                              </div>
+                              <span
+                                className={`text-[11px] font-semibold whitespace-nowrap shrink-0 ${
+                                  item.alreadyIssued
+                                    ? 'text-emerald-700'
+                                    : isChosen
+                                    ? 'text-amber-800'
+                                    : 'text-blue-700'
+                                }`}
+                              >
+                                {item.alreadyIssued
+                                  ? 'Issued'
+                                  : isChosen
+                                  ? 'Selected'
+                                  : '+ Click to Select'}
+                              </span>
+                            </button>
+                          );
+                        })
+                      ) : (
+                        <div className="px-3.5 py-3 text-xs text-slate-500">
+                          No matching participant found for &ldquo;{participantSearch.trim()}&rdquo;.
+                        </div>
+                      )}
+
+                      {participantSearch.trim().length >= 2 && (
+                        <button
+                          type="button"
+                          onMouseDown={(e) => e.preventDefault()}
+                          onClick={handleQuickAddSearchQueryAsManual}
+                          className="w-full px-3.5 py-2.5 text-left bg-slate-50 hover:bg-blue-50 text-xs font-semibold text-blue-800 inline-flex items-center gap-2"
+                        >
+                          <UserPlus className="w-3.5 h-3.5 shrink-0" />
+                          <span className="truncate">
+                            Use &ldquo;{participantSearch.trim()}&rdquo; as a manually typed name
+                          </span>
+                        </button>
+                      )}
+                    </div>
+                  )}
+                </div>
+
+                {/* 2. Manually Type Participant Name(s) */}
+                <form
+                  onSubmit={handleAddAndIssueManualNominees}
+                  className="lg:col-span-6 space-y-2.5"
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <label
+                      htmlFor="rec-manual-names-input"
+                      className="text-xs font-bold text-slate-900 inline-flex items-center gap-1.5"
+                    >
+                      <UserPlus className="w-3.5 h-3.5 text-blue-700" />
+                      <span>2. Or Manually Type Name(s)</span>
+                    </label>
+                    <span className="font-mono-tabular text-[11px] text-slate-500">
+                      {parsedManualNames.length > 0
+                        ? `${parsedManualNames.length} name${
+                            parsedManualNames.length === 1 ? '' : 's'
+                          } ready`
+                        : 'Comma or new line for multiple'}
+                    </span>
+                  </div>
+
+                  <textarea
+                    id="rec-manual-names-input"
+                    rows={2}
+                    value={manualNamesInput}
+                    onChange={(e) => setManualNamesInput(e.target.value)}
+                    placeholder="Type a participant name or multiple names separated by commas or new lines (e.g., Sarah Jenkins, Ahmad Fauzi)"
+                    className="w-full px-3 py-2 text-xs bg-white border border-slate-300 rounded-xl text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-600"
+                  />
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    <input
+                      type="text"
+                      maxLength={100}
+                      value={customNomineeDept}
+                      onChange={(e) => setCustomNomineeDept(e.target.value)}
+                      placeholder="Class / Department (optional)"
+                      className="min-h-[38px] px-3 py-1.5 text-xs bg-white border border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-600"
+                    />
+                    <input
+                      type="email"
+                      maxLength={128}
+                      value={customNomineeEmail}
+                      onChange={(e) => setCustomNomineeEmail(e.target.value)}
+                      disabled={parsedManualNames.length > 1}
+                      placeholder={
+                        parsedManualNames.length > 1
+                          ? 'Email disabled for multi-name entry'
+                          : 'Email (optional)'
+                      }
+                      className="min-h-[38px] px-3 py-1.5 text-xs bg-white border border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-600 disabled:bg-slate-100 disabled:text-slate-400"
+                    />
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-2 pt-0.5">
+                    <button
+                      type="button"
+                      disabled={issuing || parsedManualNames.length === 0}
+                      onClick={handleAddManualNamesToQueue}
+                      className="min-h-[38px] px-3.5 py-1.5 rounded-xl border border-slate-300 bg-white hover:bg-slate-100 text-slate-800 text-xs font-semibold inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 disabled:opacity-50"
+                    >
+                      <Plus className="w-3.5 h-3.5 text-blue-700" />
+                      <span>
+                        Add Name{parsedManualNames.length > 1 ? 's' : ''} to Chosen List
+                      </span>
+                    </button>
+
+                    <button
+                      type="submit"
+                      disabled={
+                        issuing || !selectedCategory || parsedManualNames.length === 0
+                      }
+                      className="min-h-[38px] px-3.5 py-1.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 disabled:opacity-50"
+                    >
+                      <Award className="w-3.5 h-3.5" />
+                      <span>
+                        Issue Now ({parsedManualNames.length || 0})
+                      </span>
+                    </button>
+                  </div>
+                </form>
+              </div>
+
+              {/* Chosen Best Participants Queue */}
+              {chosenStatusList.length > 0 && (
+                <div className="px-6 py-4 bg-amber-50/40 border-b border-slate-200 space-y-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex items-center gap-2">
+                      <UserCheck className="w-4 h-4 text-amber-700 shrink-0" />
+                      <h4 className="text-xs font-bold text-slate-900">
+                        Chosen Best Participants for &ldquo;
+                        {selectedCategory?.name || 'Category'}&rdquo; (
+                        <span className="font-mono-tabular">
+                          {chosenStatusList.length}
+                        </span>
+                        )
+                      </h4>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setChosenRecipients([])}
+                        className="text-xs font-semibold text-slate-600 hover:text-slate-900 whitespace-nowrap"
+                      >
+                        Clear All
+                      </button>
+                      <button
+                        type="button"
+                        disabled={issuing || eligibleChosenCount === 0}
+                        onClick={() => void handleIssueSelectedCertificates()}
+                        className="min-h-[36px] px-3.5 py-1.5 rounded-xl bg-amber-600 hover:bg-amber-700 text-white text-xs font-semibold inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 disabled:opacity-50"
+                      >
+                        {issuing ? (
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        ) : (
+                          <FileCheck2 className="w-3.5 h-3.5" />
+                        )}
+                        <span>
+                          Issue Certificates ({eligibleChosenCount})
+                        </span>
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
+                    {chosenStatusList.map((item) => (
+                      <div
+                        key={item.key}
+                        className={`flex items-center justify-between gap-2.5 px-3 py-2 rounded-xl border bg-white ${
+                          item.alreadyIssued
+                            ? 'border-rose-200 opacity-75'
+                            : 'border-slate-200'
+                        }`}
+                      >
+                        <div className="min-w-0">
+                          <div className="text-xs font-bold text-slate-900 truncate">
+                            {item.fullName}
+                          </div>
+                          <div className="text-[11px] text-slate-500 truncate">
+                            {[
+                              item.classDepartment,
+                              item.sourceLabel ||
+                                (item.source === 'manual'
+                                  ? 'Typed Manually'
+                                  : 'Selected'),
+                            ]
+                              .filter(Boolean)
+                              .join(' · ')}
+                            {item.alreadyIssued ? ' · Already Issued' : ''}
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => removeChosenRecipient(item.key)}
+                          aria-label={`Remove ${item.fullName}`}
+                          className="min-h-[28px] min-w-[28px] rounded-lg text-slate-400 hover:text-rose-700 hover:bg-rose-50 inline-flex items-center justify-center shrink-0"
+                        >
+                          <X className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
 
               {issueError && (
                 <div className="mx-6 mt-4 rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-xs text-rose-800 font-medium">
@@ -1580,10 +2052,12 @@ export default function AdminRecognitionModule({
                 <div className="p-8 text-center space-y-2">
                   <Users className="w-8 h-8 text-slate-300 mx-auto" />
                   <p className="text-sm font-semibold text-slate-900">
-                    No attendance records found for this event
+                    {participantSearch.trim()
+                      ? `No attendees in "${selectedEvent.title}" match "${participantSearch.trim()}"`
+                      : 'No checked-in attendees yet for this event'}
                   </p>
                   <p className="text-xs text-slate-500">
-                    Participants appear here once they check in, or you can manually enter a nominee below.
+                    Search above to pick participants from other sessions, or manually type participant name(s) to issue awards right away.
                   </p>
                 </div>
               ) : (
@@ -1591,9 +2065,9 @@ export default function AdminRecognitionModule({
                   <table className="w-full text-left border-collapse text-sm">
                     <thead>
                       <tr className="border-b border-slate-200 bg-slate-50 text-xs font-semibold text-slate-600">
-                        <th className="py-3 px-4 w-10">Select</th>
+                        <th className="py-3 px-4 w-10">Pick</th>
                         <th className="py-3 px-4">Arrival</th>
-                        <th className="py-3 px-4">Participant</th>
+                        <th className="py-3 px-4">Participant (Click Name to Select)</th>
                         <th className="py-3 px-4">Class / Dept</th>
                         <th className="py-3 px-4">Check-In &amp; Status</th>
                         {selectionMode === 'evaluation' && (
@@ -1612,13 +2086,17 @@ export default function AdminRecognitionModule({
                           matchedFeedback,
                           alreadyIssued,
                         }) => {
-                          const checked = selectedAttendanceIds.has(record.id);
+                          const rKey = normalizeRecipientKey(
+                            record.fullName,
+                            record.participantEmail
+                          );
+                          const checked = chosenRecipientKeys.has(rKey);
                           return (
                             <tr
                               key={record.id}
                               onClick={() => {
                                 if (!alreadyIssued) {
-                                  toggleAttendanceSelection(record.id);
+                                  toggleAttendanceRecord(record);
                                 }
                               }}
                               className={`transition-colors ${
@@ -1636,9 +2114,7 @@ export default function AdminRecognitionModule({
                                 <button
                                   type="button"
                                   disabled={alreadyIssued}
-                                  onClick={() =>
-                                    toggleAttendanceSelection(record.id)
-                                  }
+                                  onClick={() => toggleAttendanceRecord(record)}
                                   aria-label={`Select ${record.fullName}`}
                                   className="text-slate-500 hover:text-amber-700 disabled:opacity-40"
                                 >
@@ -1653,14 +2129,24 @@ export default function AdminRecognitionModule({
                                 #{arrivalRank}
                               </td>
                               <td className="py-3 px-4">
-                                <div className="flex items-center gap-2.5">
+                                <button
+                                  type="button"
+                                  disabled={alreadyIssued}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    if (!alreadyIssued) {
+                                      toggleAttendanceRecord(record);
+                                    }
+                                  }}
+                                  className="flex items-center gap-2.5 text-left group disabled:cursor-not-allowed"
+                                >
                                   <img
                                     src={record.photoDataUrl}
                                     alt={record.fullName}
                                     className="w-8 h-8 rounded-full object-cover border border-slate-200 shrink-0"
                                   />
                                   <div className="min-w-0">
-                                    <div className="font-semibold text-slate-900 truncate">
+                                    <div className="font-semibold text-slate-900 group-hover:text-blue-700 group-hover:underline truncate">
                                       {record.fullName}
                                     </div>
                                     {record.participantEmail && (
@@ -1669,7 +2155,7 @@ export default function AdminRecognitionModule({
                                       </div>
                                     )}
                                   </div>
-                                </div>
+                                </button>
                               </td>
                               <td className="py-3 px-4 text-xs text-slate-700">
                                 {record.classDepartment}
@@ -1722,6 +2208,10 @@ export default function AdminRecognitionModule({
                                     <CheckCircle2 className="w-3.5 h-3.5" />
                                     <span>Issued</span>
                                   </span>
+                                ) : checked ? (
+                                  <span className="text-xs font-semibold text-amber-800">
+                                    Chosen
+                                  </span>
                                 ) : (
                                   <span className="text-xs text-slate-400">
                                     Eligible
@@ -1736,55 +2226,6 @@ export default function AdminRecognitionModule({
                   </table>
                 </div>
               )}
-
-              {/* Add & Issue Manual Nominee outside attendance roster */}
-              <form
-                onSubmit={handleIssueCustomNominee}
-                className="px-6 py-4 bg-slate-50 border-t border-slate-200 space-y-3"
-              >
-                <div className="text-xs font-bold uppercase tracking-wider text-slate-700 inline-flex items-center gap-1.5">
-                  <UserPlus className="w-3.5 h-3.5 text-blue-700" />
-                  <span>
-                    Or Issue Directly to a Manual Nominee (
-                    {selectedCategory?.name || 'Category'})
-                  </span>
-                </div>
-                <div className="grid grid-cols-1 sm:grid-cols-4 gap-2.5">
-                  <input
-                    type="text"
-                    required
-                    maxLength={100}
-                    value={customNomineeName}
-                    onChange={(e) => setCustomNomineeName(e.target.value)}
-                    placeholder="Recipient full name *"
-                    className="min-h-[40px] px-3 py-1.5 text-xs bg-white border border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-600"
-                  />
-                  <input
-                    type="text"
-                    maxLength={100}
-                    value={customNomineeDept}
-                    onChange={(e) => setCustomNomineeDept(e.target.value)}
-                    placeholder="Class / Department (optional)"
-                    className="min-h-[40px] px-3 py-1.5 text-xs bg-white border border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-600"
-                  />
-                  <input
-                    type="email"
-                    maxLength={128}
-                    value={customNomineeEmail}
-                    onChange={(e) => setCustomNomineeEmail(e.target.value)}
-                    placeholder="Email (optional)"
-                    className="min-h-[40px] px-3 py-1.5 text-xs bg-white border border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-600"
-                  />
-                  <button
-                    type="submit"
-                    disabled={issuing || !selectedCategory}
-                    className="min-h-[40px] px-4 py-1.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold inline-flex items-center justify-center gap-1.5 whitespace-nowrap shrink-0 disabled:opacity-50"
-                  >
-                    <Award className="w-3.5 h-3.5" />
-                    <span>Issue Single Certificate</span>
-                  </button>
-                </div>
-              </form>
             </section>
           ) : (
             <section className="bg-white border border-slate-200 rounded-2xl p-10 text-center space-y-2">
