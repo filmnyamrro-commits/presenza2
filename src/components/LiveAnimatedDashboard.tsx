@@ -32,6 +32,7 @@ import {
 } from 'motion/react';
 import QRCode from 'qrcode';
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import type {
   AttendanceRecord,
   EventRecord,
@@ -663,12 +664,12 @@ export default function LiveAnimatedDashboard({
 
   const orgName = branding?.organizationName?.trim() || '';
 
-  return (
+  const dashboardContent = (
     <div
       ref={rootOverlayRef}
       className={
         isProjectorOpen
-          ? `fixed inset-0 z-[70] flex flex-col overflow-hidden ${theme.canvasBg}`
+          ? `fixed inset-0 z-[75] flex flex-col overflow-hidden ${theme.canvasBg}`
           : `relative rounded-2xl border border-slate-200 overflow-hidden flex flex-col ${theme.canvasBg}`
       }
       style={isProjectorOpen ? undefined : { minHeight: '76vh' }}
@@ -719,7 +720,7 @@ export default function LiveAnimatedDashboard({
                   theme.isDark ? 'text-emerald-400' : 'text-emerald-700'
                 }`}
               >
-                LIVE ATTENDANCE BOARD
+                {selectedEvent ? 'ONGOING EVENT · LIVE BOARD' : 'LIVE ATTENDANCE BOARD'}
               </span>
             </div>
 
@@ -2068,4 +2069,10 @@ export default function LiveAnimatedDashboard({
       )}
     </div>
   );
+
+  if (isProjectorOpen && typeof document !== 'undefined') {
+    return createPortal(dashboardContent, document.body);
+  }
+
+  return dashboardContent;
 }

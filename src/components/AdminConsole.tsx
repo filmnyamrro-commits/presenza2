@@ -1303,6 +1303,7 @@ export default function AdminConsole({
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
       });
+      setSelectedEventFilter(eventId);
       setQrEvent({
         id: eventId,
         ...payload,
@@ -1479,6 +1480,7 @@ export default function AdminConsole({
         await setDoc(doc(db, 'feedbackConfigs', eventId), feedbackPayload);
 
         setShowEventModal(false);
+        setSelectedEventFilter(eventId);
         setQrEvent({
           id: eventId,
           ...newPayload,
@@ -1910,7 +1912,7 @@ export default function AdminConsole({
 
   // Authenticated Admin Console
   return (
-    <div className="relative isolate min-h-[calc(100vh-10rem)]">
+    <div className="relative min-h-[calc(100vh-10rem)]">
       {adminNativeLogoBackdrop}
       <div className="relative z-10 max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 sm:py-8 space-y-8">
       {/* Top Admin Header */}
@@ -1930,6 +1932,12 @@ export default function AdminConsole({
           <button
             type="button"
             onClick={() => {
+              if (selectedEventFilter === 'all') {
+                const ongoingEvent = events.find((e) => e.status === 'active') ?? events[0];
+                if (ongoingEvent) {
+                  setSelectedEventFilter(ongoingEvent.id);
+                }
+              }
               setCurrentSection('live-board');
               setIsProjectorOpen(true);
             }}
@@ -2460,7 +2468,10 @@ export default function AdminConsole({
                         eventId={ev.id}
                         eventTitle={ev.title}
                         publicAppUrl={branding?.publicAppUrl}
-                        onClick={() => setQrEvent(ev)}
+                        onClick={() => {
+                          setSelectedEventFilter(ev.id);
+                          setQrEvent(ev);
+                        }}
                       />
 
                       <div className="min-w-0 space-y-1">
@@ -2540,7 +2551,10 @@ export default function AdminConsole({
                     <div className="flex flex-wrap items-center gap-1.5 shrink-0">
                       <button
                         type="button"
-                        onClick={() => setQrEvent(ev)}
+                        onClick={() => {
+                          setSelectedEventFilter(ev.id);
+                          setQrEvent(ev);
+                        }}
                         className="min-h-[38px] px-3 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold transition-colors inline-flex items-center gap-1.5 whitespace-nowrap"
                       >
                         <QrCode className="w-3.5 h-3.5" />
@@ -3250,11 +3264,12 @@ export default function AdminConsole({
       </section>
         </>
       )}
+      </div>
 
       {/* Create / Edit Session Modal */}
       {showEventModal && (
         <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 backdrop-blur-sm p-4"
+          className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-950/60 backdrop-blur-sm p-4"
           role="dialog"
           aria-modal="true"
           aria-labelledby="event-modal-title"
@@ -4086,35 +4101,44 @@ export default function AdminConsole({
       )}
 
       {/* QR Code + Live Clock-In Dashboard Modal */}
-      {qrEvent && (
-        <QrPosterModal
-          event={qrEvent}
-          eventAttendances={attendances.filter((a) => a.eventId === qrEvent.id)}
-          onClose={() => setQrEvent(null)}
-          onOpenCheckIn={onOpenCheckIn}
-          onOpenFeedback={onOpenFeedbackForm}
-          onLaunchProjector={(eventId) => {
-            setSelectedEventFilter(eventId);
-            setCurrentSection('live-board');
-            setIsProjectorOpen(true);
-          }}
-          onPreviewPhoto={(rec) => setLightboxRecord(rec)}
-          dashboardBgUrl={dashboardBgUrl}
-          dashboardBgOpacity={dashboardBgOpacity}
-          savingBg={savingBg}
-          bgError={bgError}
-          onUploadBackground={handleUploadDashboardBg}
-          onChangeBackgroundOpacity={handleChangeDashboardBgOpacity}
-          onRemoveBackground={handleRemoveDashboardBg}
-          branding={branding}
-          onSavePublicAppUrl={handleSavePublicAppUrl}
-        />
-      )}
+      {qrEvent && (() => {
+        const liveQrEvent = events.find((e) => e.id === qrEvent.id) ?? qrEvent;
+        return (
+          <QrPosterModal
+            event={liveQrEvent}
+            eventAttendances={attendances.filter((a) => a.eventId === liveQrEvent.id)}
+            eventFeedbackSubmissions={feedbackSubmissions.filter(
+              (s) => s.eventId === liveQrEvent.id
+            )}
+            onClose={() => setQrEvent(null)}
+            onOpenCheckIn={onOpenCheckIn}
+            onOpenFeedback={onOpenFeedbackForm}
+            onOpenFeedbackAnalytics={() => {
+              setCurrentSection('feedback');
+            }}
+            onLaunchProjector={(eventId) => {
+              setSelectedEventFilter(eventId);
+              setCurrentSection('live-board');
+              setIsProjectorOpen(true);
+            }}
+            onPreviewPhoto={(rec) => setLightboxRecord(rec)}
+            dashboardBgUrl={dashboardBgUrl}
+            dashboardBgOpacity={dashboardBgOpacity}
+            savingBg={savingBg}
+            bgError={bgError}
+            onUploadBackground={handleUploadDashboardBg}
+            onChangeBackgroundOpacity={handleChangeDashboardBgOpacity}
+            onRemoveBackground={handleRemoveDashboardBg}
+            branding={branding}
+            onSavePublicAppUrl={handleSavePublicAppUrl}
+          />
+        );
+      })()}
 
       {/* Photo Lightbox Modal */}
       {lightboxRecord && (
         <div
-          className="fixed inset-0 z-[80] flex items-center justify-center bg-slate-950/70 backdrop-blur-sm p-4"
+          className="fixed inset-0 z-[90] flex items-center justify-center bg-slate-950/70 backdrop-blur-sm p-4"
           role="dialog"
           aria-modal="true"
           onClick={() => setLightboxRecord(null)}
@@ -4712,7 +4736,6 @@ export default function AdminConsole({
           onClose={() => setShowCertCustomizer(false)}
         />
       )}
-      </div>
     </div>
   );
 }
