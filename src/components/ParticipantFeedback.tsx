@@ -505,7 +505,9 @@ export default function ParticipantFeedback({
     const liveSchedule = evaluateFeedbackSchedule(feedbackConfig, Date.now());
     if (!liveSchedule.isOpen) {
       setFormError(
-        liveSchedule.status === 'before-open'
+        liveSchedule.status === 'deactivated'
+          ? 'Feedback & Evaluation is currently deactivated by the organizer.'
+          : liveSchedule.status === 'before-open'
           ? 'Feedback submissions are not open yet for this scheduled window.'
           : 'The scheduled window for submitting feedback has closed.'
       );
@@ -951,13 +953,15 @@ export default function ParticipantFeedback({
             )}
           </aside>
 
-          {/* Right Form Sections or Scheduled Time Gate */}
+          {/* Right Form Sections or Scheduled / Deactivated Gate */}
           {!scheduleEvaluation.isOpen ? (
             <div className="lg:col-span-8 bg-white border border-slate-200 rounded-2xl p-6 sm:p-8 space-y-5">
               <div className="flex items-start gap-3.5">
                 <div
                   className={`w-12 h-12 rounded-2xl flex items-center justify-center shrink-0 ${
-                    scheduleEvaluation.status === 'before-open'
+                    scheduleEvaluation.status === 'deactivated'
+                      ? 'bg-slate-100 text-slate-700'
+                      : scheduleEvaluation.status === 'before-open'
                       ? 'bg-amber-100 text-amber-700'
                       : 'bg-rose-100 text-rose-700'
                   }`}
@@ -967,23 +971,31 @@ export default function ParticipantFeedback({
                 <div className="space-y-1">
                   <span
                     className={`inline-block text-[11px] font-bold uppercase tracking-wider px-2.5 py-0.5 rounded-md ${
-                      scheduleEvaluation.status === 'before-open'
+                      scheduleEvaluation.status === 'deactivated'
+                        ? 'bg-slate-100 text-slate-700'
+                        : scheduleEvaluation.status === 'before-open'
                         ? 'bg-amber-100 text-amber-800'
                         : 'bg-rose-100 text-rose-800'
                     }`}
                   >
-                    {scheduleEvaluation.status === 'before-open'
+                    {scheduleEvaluation.status === 'deactivated'
+                      ? 'Feedback Deactivated'
+                      : scheduleEvaluation.status === 'before-open'
                       ? 'Feedback Opens Soon'
                       : 'Feedback Window Closed'}
                   </span>
                   <h2 className="text-xl font-bold text-slate-900">
-                    {scheduleEvaluation.status === 'before-open'
+                    {scheduleEvaluation.status === 'deactivated'
+                      ? 'Feedback & Evaluation Is Currently Paused'
+                      : scheduleEvaluation.status === 'before-open'
                       ? 'Feedback & Evaluation Is Not Open Yet'
                       : 'Feedback & Evaluation Window Has Ended'}
                   </h2>
                   <p className="text-sm text-slate-600 leading-relaxed">
                     {feedbackConfig.scheduleClosedMessage.trim()
                       ? feedbackConfig.scheduleClosedMessage
+                      : scheduleEvaluation.status === 'deactivated'
+                      ? 'The organizer has temporarily deactivated feedback & evaluation for this session. This page will unlock automatically as soon as it is activated.'
                       : scheduleEvaluation.status === 'before-open'
                       ? 'The organizer has scheduled a specific time window for submitting evaluations. This page will unlock automatically once the opening time is reached.'
                       : 'The scheduled time window for filling in feedback and evaluations for this session has passed.'}

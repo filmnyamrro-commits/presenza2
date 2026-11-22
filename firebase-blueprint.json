@@ -474,6 +474,7 @@
         "categories": { "type": "array", "maxItems": 12 },
         "statements": { "type": "array", "maxItems": 40 },
         "customQuestions": { "type": "array", "maxItems": 6 },
+        "feedbackActive": { "type": "boolean" },
         "scheduleEnabled": { "type": "boolean" },
         "openAtIso": { "type": "string", "maxLength": 40 },
         "closeAtIso": { "type": "string", "maxLength": 40 },

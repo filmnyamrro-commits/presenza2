@@ -156,6 +156,7 @@ export function buildDefaultFeedbackConfig(eventId = 'default'): FeedbackConfig 
     categories: DEFAULT_FEEDBACK_CATEGORIES.map((c) => ({ ...c })),
     statements: DEFAULT_FEEDBACK_STATEMENTS.map((s) => ({ ...s })),
     customQuestions: [],
+    feedbackActive: true,
     scheduleEnabled: false,
     openAtIso: '',
     closeAtIso: '',
@@ -259,6 +260,10 @@ export function mergeFeedbackConfig(
           required: typeof q.required === 'boolean' ? q.required : false,
         }))
       : base.customQuestions,
+    feedbackActive:
+      typeof partial.feedbackActive === 'boolean'
+        ? partial.feedbackActive
+        : true,
     scheduleEnabled:
       typeof partial.scheduleEnabled === 'boolean'
         ? partial.scheduleEnabled
@@ -278,8 +283,110 @@ export function mergeFeedbackConfig(
   };
 }
 
+export function buildFeedbackConfigWritePayload(
+  config: FeedbackConfig,
+  updatedByUid: string,
+  createTimestampFromMs: (ms: number) => unknown,
+  serverTimestampValue: unknown
+): Record<string, unknown> {
+  const cleanedCriteria = config.ratingCriteria
+    .map((c) => ({
+      ...c,
+      label: c.label.trim().slice(0, 120),
+    }))
+    .filter((c) => c.label.length >= 2);
+  const safeCriteria =
+    cleanedCriteria.length > 0
+      ? cleanedCriteria.slice(0, 12)
+      : DEFAULT_RATING_CRITERIA.map((c) => ({ ...c }));
+
+  const safeCategories =
+    config.categories.length > 0
+      ? config.categories.slice(0, 12)
+      : DEFAULT_FEEDBACK_CATEGORIES.map((c) => ({ ...c }));
+
+  const cleanedStatements = config.statements
+    .map((s) => ({
+      ...s,
+      text: s.text.trim().slice(0, 200),
+    }))
+    .filter((s) => s.text.length >= 2)
+    .slice(0, 40);
+
+  const cleanedCustomQuestions = config.customQuestions
+    .map((q) => ({
+      ...q,
+      prompt: q.prompt.trim().slice(0, 200),
+      placeholder: q.placeholder.trim().slice(0, 200),
+    }))
+    .filter((q) => q.prompt.length >= 2)
+    .slice(0, 6);
+
+  const openMs = config.scheduleEnabled
+    ? parseIsoTimestampMs(config.openAtIso)
+    : null;
+  const closeMs = config.scheduleEnabled
+    ? parseIsoTimestampMs(config.closeAtIso)
+    : null;
+
+  const payload: Record<string, unknown> = {
+    eventId: config.eventId || 'default',
+    formHeading:
+      config.formHeading.trim().slice(0, 120) || 'Feedback & Evaluation',
+    introNote: config.introNote.trim().slice(0, 400),
+    ratingSectionTitle:
+      config.ratingSectionTitle.trim().slice(0, 140) ||
+      '1. Satisfaction Rating (1–5 Stars)',
+    ratingSectionSubtitle: config.ratingSectionSubtitle.trim().slice(0, 300),
+    checklistSectionTitle:
+      config.checklistSectionTitle.trim().slice(0, 140) ||
+      '2. Quick Feedback Checklist',
+    checklistSectionSubtitle: config.checklistSectionSubtitle
+      .trim()
+      .slice(0, 300),
+    commentQuestionLabel:
+      config.commentQuestionLabel.trim().slice(0, 160) ||
+      '3. Written Comments',
+    commentPlaceholder: config.commentPlaceholder.trim().slice(0, 240),
+    requireWrittenComment: Boolean(config.requireWrittenComment),
+    allowAttachment: Boolean(config.allowAttachment),
+    requireAttachment: config.allowAttachment
+      ? Boolean(config.requireAttachment)
+      : false,
+    attachmentLabel:
+      config.attachmentLabel.trim().slice(0, 160) ||
+      '4. Supporting Document, Photo, or Video',
+    ratingCriteria: safeCriteria,
+    categories: safeCategories,
+    statements: cleanedStatements,
+    customQuestions: cleanedCustomQuestions,
+    feedbackActive: config.feedbackActive !== false,
+    scheduleEnabled: Boolean(config.scheduleEnabled),
+    openAtIso:
+      config.scheduleEnabled && openMs !== null
+        ? new Date(openMs).toISOString()
+        : '',
+    closeAtIso:
+      config.scheduleEnabled && closeMs !== null
+        ? new Date(closeMs).toISOString()
+        : '',
+    scheduleClosedMessage: config.scheduleClosedMessage.trim().slice(0, 300),
+    updatedByUid,
+    updatedAt: serverTimestampValue,
+  };
+
+  if (config.scheduleEnabled && openMs !== null) {
+    payload.openTimestamp = createTimestampFromMs(openMs);
+  }
+  if (config.scheduleEnabled && closeMs !== null) {
+    payload.closeTimestamp = createTimestampFromMs(closeMs);
+  }
+
+  return payload;
+}
+
 export interface FeedbackScheduleEvaluation {
-  status: 'always-open' | 'open' | 'before-open' | 'closed';
+  status: 'deactivated' | 'always-open' | 'open' | 'before-open' | 'closed';
   isOpen: boolean;
   openAtMs: number | null;
   closeAtMs: number | null;
@@ -294,9 +401,28 @@ export function parseIsoTimestampMs(iso?: string | null): number | null {
 }
 
 export function evaluateFeedbackSchedule(
-  config: Pick<FeedbackConfig, 'scheduleEnabled' | 'openAtIso' | 'closeAtIso'>,
+  config: Pick<
+    FeedbackConfig,
+    'scheduleEnabled' | 'openAtIso' | 'closeAtIso'
+  > & { feedbackActive?: boolean },
   nowMs: number = Date.now()
 ): FeedbackScheduleEvaluation {
+  const openAtMs = parseIsoTimestampMs(config.openAtIso);
+  const closeAtMs = parseIsoTimestampMs(config.closeAtIso);
+  const openAtDate = openAtMs !== null ? new Date(openAtMs) : null;
+  const closeAtDate = closeAtMs !== null ? new Date(closeAtMs) : null;
+
+  if (config.feedbackActive === false) {
+    return {
+      status: 'deactivated',
+      isOpen: false,
+      openAtMs,
+      closeAtMs,
+      openAtDate,
+      closeAtDate,
+    };
+  }
+
   if (!config.scheduleEnabled) {
     return {
       status: 'always-open',
@@ -307,11 +433,6 @@ export function evaluateFeedbackSchedule(
       closeAtDate: null,
     };
   }
-
-  const openAtMs = parseIsoTimestampMs(config.openAtIso);
-  const closeAtMs = parseIsoTimestampMs(config.closeAtIso);
-  const openAtDate = openAtMs !== null ? new Date(openAtMs) : null;
-  const closeAtDate = closeAtMs !== null ? new Date(closeAtMs) : null;
 
   if (openAtMs !== null && nowMs < openAtMs) {
     return {

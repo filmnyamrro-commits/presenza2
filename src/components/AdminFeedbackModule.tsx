@@ -16,8 +16,11 @@ import {
   Loader2,
   MessageSquare,
   Paperclip,
+  PauseCircle,
+  PlayCircle,
   Plus,
   QrCode,
+  Radio,
   RotateCcw,
   Save,
   Settings2,
@@ -49,6 +52,7 @@ import { exportFeedbackCsv } from '../utils/csvExport';
 import { formatLocalDateYmd, generateSafeId } from '../utils/dateTime';
 import {
   buildDefaultFeedbackConfig,
+  buildFeedbackConfigWritePayload,
   evaluateFeedbackSchedule,
   formatScheduleCountdown,
   formatScheduleDateTime,
@@ -71,6 +75,8 @@ interface AdminFeedbackModuleProps {
   feedbackConfigsById: Map<string, FeedbackConfig>;
   feedbackSubmissions: FeedbackSubmissionRecord[];
   onOpenFeedbackForm: (eventId: string) => void;
+  initialCustomizeEventId?: string | null;
+  customizeRequestNonce?: number;
 }
 
 export default function AdminFeedbackModule({
@@ -80,6 +86,8 @@ export default function AdminFeedbackModule({
   feedbackConfigsById,
   feedbackSubmissions,
   onOpenFeedbackForm,
+  initialCustomizeEventId,
+  customizeRequestNonce,
 }: AdminFeedbackModuleProps) {
   const [subTab, setSubTab] = useState<'analytics' | 'customize'>('analytics');
 
@@ -117,6 +125,9 @@ export default function AdminFeedbackModule({
     mergeFeedbackConfig(feedbackConfigsById.get('default'), 'default')
   );
   const [savingConfig, setSavingConfig] = useState(false);
+  const [togglingActiveEventId, setTogglingActiveEventId] = useState<string | null>(
+    null
+  );
   const [configError, setConfigError] = useState<string | null>(null);
   const [configSaved, setConfigSaved] = useState(false);
 
@@ -145,6 +156,15 @@ export default function AdminFeedbackModule({
       );
     }
   }, [events, qrTargetEventId]);
+
+  // Jump directly to Customize Questions & Schedule for an event when requested from AdminConsole
+  useEffect(() => {
+    if (!customizeRequestNonce || !initialCustomizeEventId) return;
+    setConfigTargetId(initialCustomizeEventId);
+    setSubTab('customize');
+    setConfigSaved(false);
+    setConfigError(null);
+  }, [customizeRequestNonce, initialCustomizeEventId]);
 
   // Sync draftConfig whenever target scope or remote configs change cleanly
   useEffect(() => {
@@ -730,6 +750,53 @@ export default function AdminFeedbackModule({
     });
   };
 
+  const handleQuickToggleFeedbackActive = async (
+    targetEventId: string,
+    nextActive: boolean
+  ) => {
+    setConfigError(null);
+    setTogglingActiveEventId(targetEventId);
+    try {
+      const base =
+        targetEventId === configTargetId
+          ? draftConfig
+          : mergeFeedbackConfig(
+              feedbackConfigsById.get(targetEventId) ??
+                feedbackConfigsById.get('default') ??
+                null,
+              targetEventId
+            );
+      const updatedConfig: FeedbackConfig = {
+        ...base,
+        eventId: targetEventId,
+        feedbackActive: nextActive,
+      };
+      const payload = buildFeedbackConfigWritePayload(
+        updatedConfig,
+        user.uid,
+        (ms) => Timestamp.fromMillis(ms),
+        serverTimestamp()
+      );
+      await setDoc(doc(db, 'feedbackConfigs', targetEventId), payload);
+      if (targetEventId === configTargetId) {
+        setDraftConfig((prev) => ({ ...prev, feedbackActive: nextActive }));
+      }
+      setConfigSaved(true);
+      window.setTimeout(() => setConfigSaved(false), 2000);
+    } catch (error) {
+      const info = reportFirestoreError(
+        error,
+        OperationType.WRITE,
+        `feedbackConfigs/${targetEventId}`
+      );
+      setConfigError(
+        `Failed to update feedback status (${info.code || 'write-error'}): ${info.error}`
+      );
+    } finally {
+      setTogglingActiveEventId(null);
+    }
+  };
+
   const handleSaveFeedbackConfig = async () => {
     setConfigError(null);
     setConfigSaved(false);
@@ -745,16 +812,6 @@ export default function AdminFeedbackModule({
       setConfigError('Please keep at least 1 feedback category.');
       return;
     }
-    const cleanedStatements = draftConfig.statements
-      .map((s) => ({ ...s, text: s.text.trim().slice(0, 200) }))
-      .filter((s) => s.text.length >= 2);
-    const cleanedCustomQuestions = draftConfig.customQuestions
-      .map((q) => ({
-        ...q,
-        prompt: q.prompt.trim().slice(0, 200),
-        placeholder: q.placeholder.trim().slice(0, 200),
-      }))
-      .filter((q) => q.prompt.length >= 2);
 
     const openMs = draftConfig.scheduleEnabled
       ? parseIsoTimestampMs(draftConfig.openAtIso)
@@ -780,60 +837,16 @@ export default function AdminFeedbackModule({
 
     setSavingConfig(true);
     try {
-      const payload: Record<string, unknown> = {
-        eventId: configTargetId,
-        formHeading:
-          draftConfig.formHeading.trim().slice(0, 120) || 'Feedback & Evaluation',
-        introNote: draftConfig.introNote.trim().slice(0, 400),
-        ratingSectionTitle:
-          draftConfig.ratingSectionTitle.trim().slice(0, 140) ||
-          '1. Satisfaction Rating (1–5 Stars)',
-        ratingSectionSubtitle: draftConfig.ratingSectionSubtitle
-          .trim()
-          .slice(0, 300),
-        checklistSectionTitle:
-          draftConfig.checklistSectionTitle.trim().slice(0, 140) ||
-          '2. Quick Feedback Checklist',
-        checklistSectionSubtitle: draftConfig.checklistSectionSubtitle
-          .trim()
-          .slice(0, 300),
-        commentQuestionLabel:
-          draftConfig.commentQuestionLabel.trim().slice(0, 160) ||
-          '3. Written Comments',
-        commentPlaceholder: draftConfig.commentPlaceholder.trim().slice(0, 240),
-        requireWrittenComment: draftConfig.requireWrittenComment,
-        allowAttachment: draftConfig.allowAttachment,
-        requireAttachment: draftConfig.allowAttachment
-          ? draftConfig.requireAttachment
-          : false,
-        attachmentLabel:
-          draftConfig.attachmentLabel.trim().slice(0, 160) ||
-          '4. Supporting Document, Photo, or Video',
-        ratingCriteria: cleanedCriteria.slice(0, 12),
-        categories: draftConfig.categories.slice(0, 12),
-        statements: cleanedStatements.slice(0, 40),
-        customQuestions: cleanedCustomQuestions.slice(0, 6),
-        scheduleEnabled: draftConfig.scheduleEnabled,
-        openAtIso:
-          draftConfig.scheduleEnabled && openMs !== null
-            ? new Date(openMs).toISOString()
-            : '',
-        closeAtIso:
-          draftConfig.scheduleEnabled && closeMs !== null
-            ? new Date(closeMs).toISOString()
-            : '',
-        scheduleClosedMessage: draftConfig.scheduleClosedMessage
-          .trim()
-          .slice(0, 300),
-        updatedByUid: user.uid,
-        updatedAt: serverTimestamp(),
-      };
-      if (draftConfig.scheduleEnabled && openMs !== null) {
-        payload.openTimestamp = Timestamp.fromMillis(openMs);
-      }
-      if (draftConfig.scheduleEnabled && closeMs !== null) {
-        payload.closeTimestamp = Timestamp.fromMillis(closeMs);
-      }
+      const payload = buildFeedbackConfigWritePayload(
+        {
+          ...draftConfig,
+          eventId: configTargetId,
+          ratingCriteria: cleanedCriteria,
+        },
+        user.uid,
+        (ms) => Timestamp.fromMillis(ms),
+        serverTimestamp()
+      );
 
       await setDoc(doc(db, 'feedbackConfigs', configTargetId), payload);
       setConfigSaved(true);
@@ -854,6 +867,10 @@ export default function AdminFeedbackModule({
 
   const hasCustomOverrideForTarget =
     configTargetId !== 'default' && feedbackConfigsById.has(configTargetId);
+  const selectedTargetEvent =
+    configTargetId !== 'default'
+      ? events.find((e) => e.id === configTargetId) || null
+      : null;
 
   const openScheduleParts = isoToLocalDateAndTime(draftConfig.openAtIso);
   const closeScheduleParts = isoToLocalDateAndTime(draftConfig.closeAtIso);
@@ -983,8 +1000,36 @@ export default function AdminFeedbackModule({
                         <>
                           <button
                             type="button"
+                            disabled={togglingActiveEventId === qrTargetEventId}
+                            onClick={() =>
+                              void handleQuickToggleFeedbackActive(
+                                qrTargetEventId,
+                                qrEventEffectiveConfig.feedbackActive === false
+                              )
+                            }
+                            className={`min-h-[36px] px-3 py-1.5 rounded-lg border text-xs font-semibold inline-flex items-center gap-1.5 whitespace-nowrap transition-colors disabled:opacity-60 ${
+                              qrEventEffectiveConfig.feedbackActive === false
+                                ? 'border-emerald-300 bg-emerald-50 hover:bg-emerald-100 text-emerald-800'
+                                : 'border-amber-300 bg-amber-50 hover:bg-amber-100 text-amber-900'
+                            }`}
+                          >
+                            {togglingActiveEventId === qrTargetEventId ? (
+                              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                            ) : qrEventEffectiveConfig.feedbackActive === false ? (
+                              <PlayCircle className="w-3.5 h-3.5" />
+                            ) : (
+                              <PauseCircle className="w-3.5 h-3.5" />
+                            )}
+                            <span>
+                              {qrEventEffectiveConfig.feedbackActive === false
+                                ? 'Activate Feedback'
+                                : 'Deactivate Feedback'}
+                            </span>
+                          </button>
+                          <button
+                            type="button"
                             onClick={() => onOpenFeedbackForm(qrTargetEventId)}
-                            className="min-h-[36px] px-3 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold inline-flex items-center gap-1.5"
+                            className="min-h-[36px] px-3 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold inline-flex items-center gap-1.5 whitespace-nowrap"
                           >
                             <ExternalLink className="w-3.5 h-3.5" />
                             <span>Open Form</span>
@@ -995,7 +1040,7 @@ export default function AdminFeedbackModule({
                               setConfigTargetId(qrTargetEventId);
                               setSubTab('customize');
                             }}
-                            className="min-h-[36px] px-3 py-1.5 rounded-lg border border-blue-200 bg-blue-50 hover:bg-blue-100 text-blue-800 text-xs font-semibold inline-flex items-center gap-1.5"
+                            className="min-h-[36px] px-3 py-1.5 rounded-lg border border-blue-200 bg-blue-50 hover:bg-blue-100 text-blue-800 text-xs font-semibold inline-flex items-center gap-1.5 whitespace-nowrap"
                           >
                             <CalendarClock className="w-3.5 h-3.5" />
                             <span>Edit Questions &amp; Time</span>
@@ -1009,28 +1054,34 @@ export default function AdminFeedbackModule({
                 <div className="rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-xs space-y-1 shrink-0 lg:max-w-xs">
                   <div className="flex items-center gap-1.5 font-semibold text-slate-800">
                     <Clock className="w-3.5 h-3.5 text-blue-700" />
-                    <span>Submission Schedule</span>
+                    <span>Feedback Status</span>
                     <span
                       className={`ml-auto px-2 py-0.5 rounded-md text-[10px] font-bold uppercase ${
-                        qrEventSchedule.status === 'always-open' ||
-                        qrEventSchedule.status === 'open'
+                        qrEventSchedule.status === 'deactivated'
+                          ? 'bg-slate-200 text-slate-700'
+                          : qrEventSchedule.status === 'always-open' ||
+                            qrEventSchedule.status === 'open'
                           ? 'bg-emerald-100 text-emerald-800'
                           : qrEventSchedule.status === 'before-open'
                           ? 'bg-amber-100 text-amber-800'
                           : 'bg-rose-100 text-rose-800'
                       }`}
                     >
-                      {qrEventSchedule.status === 'always-open'
-                        ? 'Always Open'
+                      {qrEventSchedule.status === 'deactivated'
+                        ? 'Deactivated'
+                        : qrEventSchedule.status === 'always-open'
+                        ? 'Active · Always Open'
                         : qrEventSchedule.status === 'open'
-                        ? 'Open Now'
+                        ? 'Active · Open Now'
                         : qrEventSchedule.status === 'before-open'
                         ? 'Scheduled'
                         : 'Closed'}
                     </span>
                   </div>
                   <p className="text-[11px] text-slate-600 leading-snug">
-                    {!qrEventEffectiveConfig.scheduleEnabled
+                    {qrEventSchedule.status === 'deactivated'
+                      ? 'Paused by administrator — participants see a paused notice until reactivated.'
+                      : !qrEventEffectiveConfig.scheduleEnabled
                       ? 'Open anytime while the session is active.'
                       : `${
                           qrEventEffectiveConfig.openAtIso
@@ -1693,8 +1744,77 @@ export default function AdminFeedbackModule({
             </div>
           )}
 
-          {/* 1. Submission Time Schedule */}
+          {selectedTargetEvent?.status === 'active' && (
+            <div className="rounded-xl border border-emerald-200 bg-emerald-50/70 px-4 py-3 flex items-start gap-2.5 text-xs text-emerald-950">
+              <Radio className="w-4 h-4 text-emerald-700 shrink-0 mt-0.5" />
+              <div>
+                <span className="font-bold">Ongoing Session Live Sync:</span>{' '}
+                Changes to rating questions, checklist statements, activation state, or submission schedule apply immediately to participants viewing or opening the feedback form during this session.
+              </div>
+            </div>
+          )}
+
+          {/* 1. Activation & Submission Time Schedule */}
           <section className="rounded-2xl border border-blue-200 bg-blue-50/40 p-4 sm:p-5 space-y-4">
+            {/* Live Activate / Deactivate Row */}
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3.5 border-b border-blue-200/70">
+              <div>
+                <div className="text-sm font-bold text-slate-900 inline-flex items-center gap-2">
+                  {draftConfig.feedbackActive !== false ? (
+                    <PlayCircle className="w-4 h-4 text-emerald-700" />
+                  ) : (
+                    <PauseCircle className="w-4 h-4 text-amber-700" />
+                  )}
+                  <span>Feedback &amp; Evaluation Availability</span>
+                  <span
+                    className={`text-[11px] font-bold uppercase ${
+                      draftConfig.feedbackActive !== false
+                        ? 'text-emerald-700'
+                        : 'text-amber-800'
+                    }`}
+                  >
+                    {draftConfig.feedbackActive !== false
+                      ? '· Active'
+                      : '· Deactivated'}
+                  </span>
+                </div>
+                <p className="text-xs text-slate-600 mt-0.5">
+                  Activate or deactivate feedback anytime, including while an event is ongoing. Participants stay synced in real time.
+                </p>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2 shrink-0">
+                <button
+                  type="button"
+                  disabled={togglingActiveEventId === configTargetId}
+                  onClick={() =>
+                    void handleQuickToggleFeedbackActive(
+                      configTargetId,
+                      draftConfig.feedbackActive === false
+                    )
+                  }
+                  className={`min-h-[38px] px-3.5 py-2 rounded-xl border text-xs font-semibold inline-flex items-center gap-1.5 whitespace-nowrap transition-colors disabled:opacity-60 ${
+                    draftConfig.feedbackActive === false
+                      ? 'border-emerald-300 bg-emerald-600 hover:bg-emerald-700 text-white'
+                      : 'border-amber-300 bg-amber-50 hover:bg-amber-100 text-amber-950'
+                  }`}
+                >
+                  {togglingActiveEventId === configTargetId ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  ) : draftConfig.feedbackActive === false ? (
+                    <PlayCircle className="w-3.5 h-3.5" />
+                  ) : (
+                    <PauseCircle className="w-3.5 h-3.5" />
+                  )}
+                  <span>
+                    {draftConfig.feedbackActive === false
+                      ? 'Activate Feedback Now'
+                      : 'Deactivate Feedback Now'}
+                  </span>
+                </button>
+              </div>
+            </div>
+
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
               <div>
                 <h3 className="text-sm font-bold text-slate-900 inline-flex items-center gap-2">
@@ -1865,13 +1985,17 @@ export default function AdminFeedbackModule({
                     </div>
                     <div
                       className={`mt-0.5 font-bold ${
-                        draftScheduleEval.status === 'open'
+                        draftScheduleEval.status === 'deactivated'
+                          ? 'text-amber-700'
+                          : draftScheduleEval.status === 'open'
                           ? 'text-emerald-700'
                           : draftScheduleEval.status === 'before-open'
                           ? 'text-amber-700'
                           : 'text-rose-700'
                       }`}
                     >
+                      {draftScheduleEval.status === 'deactivated' &&
+                        'Deactivated (Paused by Admin)'}
                       {draftScheduleEval.status === 'open' &&
                         (draftScheduleEval.closeAtMs
                           ? `Open Now · Closes in ${formatScheduleCountdown(
@@ -1890,9 +2014,37 @@ export default function AdminFeedbackModule({
                 </div>
               </div>
             ) : (
-              <p className="text-xs text-slate-600 bg-white/80 border border-blue-100 rounded-xl px-3.5 py-2.5">
-                Schedule restriction is off — participants can fill in Feedback &amp; Evaluation anytime while the event session is active.
-              </p>
+              <div className="space-y-3">
+                <p className="text-xs text-slate-600 bg-white/80 border border-blue-100 rounded-xl px-3.5 py-2.5">
+                  {draftConfig.feedbackActive === false
+                    ? 'Feedback is currently deactivated — participants cannot submit feedback until you reactivate it above.'
+                    : 'Schedule restriction is off — participants can fill in Feedback & Evaluation anytime while the event session is active.'}
+                </p>
+                {draftConfig.feedbackActive === false && (
+                  <div>
+                    <label
+                      htmlFor="fb-schedule-closed-msg-paused"
+                      className="block text-xs font-semibold text-slate-700 mb-1"
+                    >
+                      Custom Message Shown While Paused (Optional)
+                    </label>
+                    <input
+                      id="fb-schedule-closed-msg-paused"
+                      type="text"
+                      maxLength={300}
+                      value={draftConfig.scheduleClosedMessage}
+                      onChange={(e) =>
+                        setDraftConfig((prev) => ({
+                          ...prev,
+                          scheduleClosedMessage: e.target.value,
+                        }))
+                      }
+                      placeholder="e.g. Evaluation will reopen once the closing keynote ends."
+                      className="w-full min-h-[38px] px-3 py-1.5 text-xs sm:text-sm bg-white border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-600"
+                    />
+                  </div>
+                )}
+              </div>
             )}
           </section>
 

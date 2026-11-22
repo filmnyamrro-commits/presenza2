@@ -285,6 +285,7 @@ service cloud.firestore {
           'allowAttachment', 'requireAttachment', 'attachmentLabel',
           'ratingCriteria', 'categories', 'statements',
           'customQuestions',
+          'feedbackActive',
           'scheduleEnabled', 'openAtIso', 'closeAtIso',
           'openTimestamp', 'closeTimestamp', 'scheduleClosedMessage',
           'updatedByUid', 'updatedAt'
@@ -309,6 +310,7 @@ service cloud.firestore {
         data.statements is list && data.statements.size() <= 40 &&
         (data.statements.size() == 0 || data.statements[0] is map) &&
         (!('customQuestions' in data) || (data.customQuestions is list && data.customQuestions.size() <= 6 && (data.customQuestions.size() == 0 || data.customQuestions[0] is map))) &&
+        (!('feedbackActive' in data) || data.feedbackActive is bool) &&
         (!('scheduleEnabled' in data) || data.scheduleEnabled is bool) &&
         (!('openAtIso' in data) || (data.openAtIso is string && data.openAtIso.size() <= 40)) &&
         (!('closeAtIso' in data) || (data.closeAtIso is string && data.closeAtIso.size() <= 40)) &&
@@ -320,11 +322,14 @@ service cloud.firestore {
     }
 
     function isConfigScheduleCurrentlyOpen(cfg) {
-      return !('scheduleEnabled' in cfg) ||
-        cfg.scheduleEnabled != true ||
+      return (!('feedbackActive' in cfg) || cfg.feedbackActive == true) &&
         (
-          (!('openTimestamp' in cfg) || request.time >= cfg.openTimestamp) &&
-          (!('closeTimestamp' in cfg) || request.time <= cfg.closeTimestamp)
+          !('scheduleEnabled' in cfg) ||
+          cfg.scheduleEnabled != true ||
+          (
+            (!('openTimestamp' in cfg) || request.time >= cfg.openTimestamp) &&
+            (!('closeTimestamp' in cfg) || request.time <= cfg.closeTimestamp)
+          )
         );
     }
 
@@ -778,6 +783,7 @@ service cloud.firestore {
           'allowAttachment', 'requireAttachment', 'attachmentLabel',
           'ratingCriteria', 'categories', 'statements',
           'customQuestions',
+          'feedbackActive',
           'scheduleEnabled', 'openAtIso', 'closeAtIso',
           'openTimestamp', 'closeTimestamp', 'scheduleClosedMessage',
           'updatedByUid', 'updatedAt'

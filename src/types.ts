@@ -218,6 +218,7 @@ export interface FeedbackConfig {
   categories: FeedbackStatementCategory[];
   statements: FeedbackStatement[];
   customQuestions: FeedbackCustomQuestion[];
+  feedbackActive: boolean;
   scheduleEnabled: boolean;
   openAtIso: string;
   closeAtIso: string;

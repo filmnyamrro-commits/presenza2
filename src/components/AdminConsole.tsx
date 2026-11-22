@@ -3,6 +3,7 @@ import {
   Archive,
   Award,
   Building2,
+  CalendarClock,
   CalendarPlus,
   Check,
   CheckCircle2,
@@ -19,11 +20,14 @@ import {
   MessageSquare,
   MonitorPlay,
   Palette,
+  PauseCircle,
+  PlayCircle,
   Plus,
   QrCode,
   Search,
   ShieldAlert,
   ShieldCheck,
+  SlidersHorizontal,
   Trash2,
   UserPlus,
   Users,
@@ -99,9 +103,15 @@ import {
   parse24hTo12h,
 } from '../utils/dateTime';
 import {
+  buildFeedbackConfigWritePayload,
   DEFAULT_RECOGNITION_TEMPLATE,
+  evaluateFeedbackSchedule,
+  formatScheduleDateTime,
+  isoToLocalDateAndTime,
+  localDateAndTimeToIso,
   mergeFeedbackConfig,
   mergeRecognitionTemplate,
+  parseIsoTimestampMs,
 } from '../utils/feedbackAndRecognitionDefaults';
 import {
   DEFAULT_LIVE_BOARD_SETTINGS,
@@ -290,6 +300,15 @@ export default function AdminConsole({
   const [evTheme, setEvTheme] = useState('');
   const [evTopic, setEvTopic] = useState('');
   const [timeFormatMode, setTimeFormatMode] = useState<'24h' | '12h'>('24h');
+  const [evFeedbackActive, setEvFeedbackActive] = useState<boolean>(true);
+  const [evFeedbackScheduleEnabled, setEvFeedbackScheduleEnabled] =
+    useState<boolean>(false);
+  const [evFeedbackOpenDate, setEvFeedbackOpenDate] = useState<string>('');
+  const [evFeedbackOpenTime, setEvFeedbackOpenTime] = useState<string>('');
+  const [evFeedbackCloseDate, setEvFeedbackCloseDate] = useState<string>('');
+  const [evFeedbackCloseTime, setEvFeedbackCloseTime] = useState<string>('');
+  const [evFeedbackClosedMessage, setEvFeedbackClosedMessage] =
+    useState<string>('');
   const [savingEvent, setSavingEvent] = useState(false);
   const [eventFormError, setEventFormError] = useState<string | null>(null);
 
@@ -300,6 +319,12 @@ export default function AdminConsole({
   const [feedbackSubmissions, setFeedbackSubmissions] = useState<
     FeedbackSubmissionRecord[]
   >([]);
+  const [togglingFeedbackEventId, setTogglingFeedbackEventId] = useState<
+    string | null
+  >(null);
+  const [customizeFeedbackTargetEventId, setCustomizeFeedbackTargetEventId] =
+    useState<string | null>(null);
+  const [customizeFeedbackNonce, setCustomizeFeedbackNonce] = useState(0);
   const [recognitionCategories, setRecognitionCategories] = useState<
     RecognitionCategory[]
   >([]);
@@ -1117,16 +1142,73 @@ export default function AdminConsole({
     }
   };
 
+  const applyModalFeedbackPreset = (
+    preset: 'session-window' | 'last-30m' | 'today' | 'clear',
+    overrideDate?: string,
+    overrideStartTime?: string
+  ) => {
+    const baseDate =
+      overrideDate || evDate || formatLocalDateYmd(new Date());
+    const baseStart = overrideStartTime || evStartTime || '09:00';
+    if (preset === 'clear') {
+      setEvFeedbackOpenDate('');
+      setEvFeedbackOpenTime('');
+      setEvFeedbackCloseDate('');
+      setEvFeedbackCloseTime('');
+      return;
+    }
+
+    if (preset === 'today') {
+      setEvFeedbackScheduleEnabled(true);
+      setEvFeedbackOpenDate(baseDate);
+      setEvFeedbackOpenTime('08:00');
+      setEvFeedbackCloseDate(baseDate);
+      setEvFeedbackCloseTime('17:00');
+      return;
+    }
+
+    const startIso = localDateAndTimeToIso(baseDate, baseStart);
+    const startMs = parseIsoTimestampMs(startIso) ?? Date.now();
+    if (preset === 'last-30m') {
+      const openParts = isoToLocalDateAndTime(
+        new Date(startMs + 90 * 60 * 1000).toISOString()
+      );
+      const closeParts = isoToLocalDateAndTime(
+        new Date(startMs + 120 * 60 * 1000).toISOString()
+      );
+      setEvFeedbackScheduleEnabled(true);
+      setEvFeedbackOpenDate(openParts.date);
+      setEvFeedbackOpenTime(openParts.time);
+      setEvFeedbackCloseDate(closeParts.date);
+      setEvFeedbackCloseTime(closeParts.time);
+      return;
+    }
+
+    // session-window: Event start -> +2h
+    const openParts = isoToLocalDateAndTime(new Date(startMs).toISOString());
+    const closeParts = isoToLocalDateAndTime(
+      new Date(startMs + 2 * 60 * 60 * 1000).toISOString()
+    );
+    setEvFeedbackScheduleEnabled(true);
+    setEvFeedbackOpenDate(openParts.date);
+    setEvFeedbackOpenTime(openParts.time);
+    setEvFeedbackCloseDate(closeParts.date);
+    setEvFeedbackCloseTime(closeParts.time);
+  };
+
   const openCreateModal = () => {
     const now = new Date();
     const cutoff = new Date(now.getTime() + 15 * 60 * 1000);
+    const defaultDate = formatLocalDateYmd(now);
+    const defaultStart = formatTime24h(now);
+    const twoHoursLater = new Date(now.getTime() + 2 * 60 * 60 * 1000);
     setEditingEvent(null);
     setEvTitle('');
     setEvCategory('');
     setEvVenue('');
     setEvDescription('');
-    setEvDate(formatLocalDateYmd(now));
-    setEvStartTime(formatTime24h(now));
+    setEvDate(defaultDate);
+    setEvStartTime(defaultStart);
     setEvCutoffTime(formatTime24h(cutoff));
     setEvDepartmentLabel('Class / Department');
     setEvConsentText(
@@ -1136,11 +1218,27 @@ export default function AdminConsole({
     setEvPrincipalName('');
     setEvTheme('');
     setEvTopic('');
+    setEvFeedbackActive(true);
+    setEvFeedbackScheduleEnabled(false);
+    setEvFeedbackOpenDate(defaultDate);
+    setEvFeedbackOpenTime(defaultStart);
+    setEvFeedbackCloseDate(formatLocalDateYmd(twoHoursLater));
+    setEvFeedbackCloseTime(formatTime24h(twoHoursLater));
+    setEvFeedbackClosedMessage('');
     setEventFormError(null);
     setShowEventModal(true);
   };
 
   const openEditModal = (ev: EventRecord) => {
+    const existingCfg = mergeFeedbackConfig(
+      feedbackConfigsById.get(ev.id) ??
+        feedbackConfigsById.get('default') ??
+        null,
+      ev.id
+    );
+    const openParts = isoToLocalDateAndTime(existingCfg.openAtIso);
+    const closeParts = isoToLocalDateAndTime(existingCfg.closeAtIso);
+
     setEditingEvent(ev);
     setEvTitle(ev.title);
     setEvCategory(ev.category);
@@ -1158,6 +1256,13 @@ export default function AdminConsole({
     setEvPrincipalName(ev.principalName || '');
     setEvTheme(ev.theme || '');
     setEvTopic(ev.topic || '');
+    setEvFeedbackActive(existingCfg.feedbackActive !== false);
+    setEvFeedbackScheduleEnabled(existingCfg.scheduleEnabled);
+    setEvFeedbackOpenDate(openParts.date || ev.eventDate);
+    setEvFeedbackOpenTime(openParts.time || ev.startTime || '08:00');
+    setEvFeedbackCloseDate(closeParts.date || ev.eventDate);
+    setEvFeedbackCloseTime(closeParts.time || '17:00');
+    setEvFeedbackClosedMessage(existingCfg.scheduleClosedMessage || '');
     setEventFormError(null);
     setShowEventModal(true);
   };
@@ -1231,6 +1336,42 @@ export default function AdminConsole({
       return;
     }
 
+    const fbOpenIso =
+      evFeedbackScheduleEnabled && evFeedbackOpenDate
+        ? localDateAndTimeToIso(
+            evFeedbackOpenDate,
+            evFeedbackOpenTime || '08:00'
+          )
+        : '';
+    const fbCloseIso =
+      evFeedbackScheduleEnabled && evFeedbackCloseDate
+        ? localDateAndTimeToIso(
+            evFeedbackCloseDate,
+            evFeedbackCloseTime || '17:00'
+          )
+        : '';
+    const fbOpenMs = evFeedbackScheduleEnabled
+      ? parseIsoTimestampMs(fbOpenIso)
+      : null;
+    const fbCloseMs = evFeedbackScheduleEnabled
+      ? parseIsoTimestampMs(fbCloseIso)
+      : null;
+
+    if (evFeedbackScheduleEnabled) {
+      if (fbOpenMs === null && fbCloseMs === null) {
+        setEventFormError(
+          'Please set a Feedback opening date/time, a closing date/time, or uncheck the scheduled feedback window.'
+        );
+        return;
+      }
+      if (fbOpenMs !== null && fbCloseMs !== null && fbCloseMs <= fbOpenMs) {
+        setEventFormError(
+          'Feedback closing date & time must be later than the feedback opening date & time.'
+        );
+        return;
+      }
+    }
+
     setSavingEvent(true);
     const cutoffTs = Timestamp.fromDate(buildCutoffDate(evDate, evCutoffTime));
 
@@ -1265,6 +1406,28 @@ export default function AdminConsole({
           requireParticipantLogin: false,
           updatedAt: serverTimestamp(),
         });
+
+        const baseFeedbackCfg = mergeFeedbackConfig(
+          feedbackConfigsById.get(editingEvent.id) ??
+            feedbackConfigsById.get('default') ??
+            null,
+          editingEvent.id
+        );
+        const feedbackPayload = buildFeedbackConfigWritePayload(
+          {
+            ...baseFeedbackCfg,
+            eventId: editingEvent.id,
+            feedbackActive: evFeedbackActive,
+            scheduleEnabled: evFeedbackScheduleEnabled,
+            openAtIso: evFeedbackScheduleEnabled ? fbOpenIso : '',
+            closeAtIso: evFeedbackScheduleEnabled ? fbCloseIso : '',
+            scheduleClosedMessage: evFeedbackClosedMessage.trim().slice(0, 300),
+          },
+          user.uid,
+          (ms) => Timestamp.fromMillis(ms),
+          serverTimestamp()
+        );
+        await setDoc(doc(db, 'feedbackConfigs', editingEvent.id), feedbackPayload);
       } else {
         const eventId = generateSafeId('evt');
         const newPayload = {
@@ -1291,6 +1454,27 @@ export default function AdminConsole({
           createdAt: serverTimestamp(),
           updatedAt: serverTimestamp(),
         });
+
+        const baseFeedbackCfg = mergeFeedbackConfig(
+          feedbackConfigsById.get('default') ?? null,
+          eventId
+        );
+        const feedbackPayload = buildFeedbackConfigWritePayload(
+          {
+            ...baseFeedbackCfg,
+            eventId,
+            feedbackActive: evFeedbackActive,
+            scheduleEnabled: evFeedbackScheduleEnabled,
+            openAtIso: evFeedbackScheduleEnabled ? fbOpenIso : '',
+            closeAtIso: evFeedbackScheduleEnabled ? fbCloseIso : '',
+            scheduleClosedMessage: evFeedbackClosedMessage.trim().slice(0, 300),
+          },
+          user.uid,
+          (ms) => Timestamp.fromMillis(ms),
+          serverTimestamp()
+        );
+        await setDoc(doc(db, 'feedbackConfigs', eventId), feedbackPayload);
+
         setShowEventModal(false);
         setQrEvent({
           id: eventId,
@@ -1310,6 +1494,39 @@ export default function AdminConsole({
       );
     } finally {
       setSavingEvent(false);
+    }
+  };
+
+  const handleToggleEventFeedbackActive = async (ev: EventRecord) => {
+    if (!user) return;
+    setTogglingFeedbackEventId(ev.id);
+    try {
+      const currentCfg = mergeFeedbackConfig(
+        feedbackConfigsById.get(ev.id) ??
+          feedbackConfigsById.get('default') ??
+          null,
+        ev.id
+      );
+      const nextActive = currentCfg.feedbackActive === false;
+      const payload = buildFeedbackConfigWritePayload(
+        {
+          ...currentCfg,
+          eventId: ev.id,
+          feedbackActive: nextActive,
+        },
+        user.uid,
+        (ms) => Timestamp.fromMillis(ms),
+        serverTimestamp()
+      );
+      await setDoc(doc(db, 'feedbackConfigs', ev.id), payload);
+    } catch (error) {
+      handleFirestoreError(
+        error,
+        OperationType.WRITE,
+        `feedbackConfigs/${ev.id}`
+      );
+    } finally {
+      setTogglingFeedbackEventId(null);
     }
   };
 
@@ -1881,6 +2098,8 @@ export default function AdminConsole({
               onOpenFeedbackForm(eventId);
             }
           }}
+          initialCustomizeEventId={customizeFeedbackTargetEventId}
+          customizeRequestNonce={customizeFeedbackNonce}
         />
       )}
 
@@ -2219,6 +2438,15 @@ export default function AdminConsole({
             <div className="divide-y divide-slate-100">
               {events.map((ev) => {
                 const count = attendanceCountsByEvent.get(ev.id) ?? 0;
+                const evFeedbackCfg = mergeFeedbackConfig(
+                  feedbackConfigsById.get(ev.id) ??
+                    feedbackConfigsById.get('default') ??
+                    null,
+                  ev.id
+                );
+                const evFeedbackEval = evaluateFeedbackSchedule(evFeedbackCfg);
+                const isFeedbackPaused = evFeedbackCfg.feedbackActive === false;
+
                 return (
                   <div
                     key={ev.id}
@@ -2265,8 +2493,43 @@ export default function AdminConsole({
                             {ev.startTime} (Cutoff {ev.lateCutoffTime})
                           </span>
                         </div>
-                        <div className="text-xs font-mono-tabular font-semibold text-slate-700">
-                          {count} {count === 1 ? 'participant checked in' : 'participants checked in'}
+                        <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1 text-xs">
+                          <span className="font-mono-tabular font-semibold text-slate-700">
+                            {count}{' '}
+                            {count === 1
+                              ? 'participant checked in'
+                              : 'participants checked in'}
+                          </span>
+                          <span className="text-slate-300" aria-hidden="true">
+                            ·
+                          </span>
+                          <span
+                            className={`font-semibold ${
+                              isFeedbackPaused
+                                ? 'text-amber-700'
+                                : evFeedbackEval.status === 'before-open'
+                                ? 'text-blue-700'
+                                : evFeedbackEval.status === 'closed'
+                                ? 'text-rose-700'
+                                : 'text-emerald-700'
+                            }`}
+                          >
+                            {isFeedbackPaused
+                              ? 'Feedback Paused'
+                              : evFeedbackEval.status === 'before-open' &&
+                                evFeedbackCfg.openAtIso
+                              ? `Feedback Opens ${formatScheduleDateTime(
+                                  evFeedbackCfg.openAtIso
+                                )}`
+                              : evFeedbackEval.status === 'closed'
+                              ? 'Feedback Window Closed'
+                              : evFeedbackCfg.scheduleEnabled &&
+                                evFeedbackCfg.closeAtIso
+                              ? `Feedback Active until ${formatScheduleDateTime(
+                                  evFeedbackCfg.closeAtIso
+                                )}`
+                              : 'Feedback Active'}
+                          </span>
                         </div>
                       </div>
                     </div>
@@ -2279,6 +2542,49 @@ export default function AdminConsole({
                       >
                         <QrCode className="w-3.5 h-3.5" />
                         <span>QR &amp; Live Board</span>
+                      </button>
+                      <button
+                        type="button"
+                        disabled={togglingFeedbackEventId === ev.id}
+                        onClick={() =>
+                          void handleToggleEventFeedbackActive(ev)
+                        }
+                        className={`min-h-[38px] px-2.5 py-1.5 rounded-lg border text-xs font-semibold transition-colors inline-flex items-center gap-1 whitespace-nowrap disabled:opacity-60 ${
+                          isFeedbackPaused
+                            ? 'border-emerald-300 bg-emerald-50 hover:bg-emerald-100 text-emerald-800'
+                            : 'border-amber-300 bg-amber-50 hover:bg-amber-100 text-amber-900'
+                        }`}
+                        title={
+                          isFeedbackPaused
+                            ? 'Activate Feedback & Evaluation for participants'
+                            : 'Pause / Deactivate Feedback & Evaluation for participants'
+                        }
+                      >
+                        {togglingFeedbackEventId === ev.id ? (
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        ) : isFeedbackPaused ? (
+                          <PlayCircle className="w-3.5 h-3.5" />
+                        ) : (
+                          <PauseCircle className="w-3.5 h-3.5" />
+                        )}
+                        <span>
+                          {isFeedbackPaused
+                            ? 'Activate Feedback'
+                            : 'Pause Feedback'}
+                        </span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setCustomizeFeedbackTargetEventId(ev.id);
+                          setCustomizeFeedbackNonce((n) => n + 1);
+                          setCurrentSection('feedback');
+                        }}
+                        className="min-h-[38px] px-2.5 py-1.5 rounded-lg border border-blue-200 bg-blue-50 hover:bg-blue-100 text-blue-800 text-xs font-semibold transition-colors inline-flex items-center gap-1 whitespace-nowrap"
+                        title="Edit Feedback questions, statements, and schedule live"
+                      >
+                        <SlidersHorizontal className="w-3.5 h-3.5" />
+                        <span>Edit Feedback</span>
                       </button>
                       <button
                         type="button"
@@ -3383,6 +3689,175 @@ export default function AdminConsole({
                     onChange={(e) => setEvConsentText(e.target.value)}
                     className="w-full px-3 py-2 text-xs border border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-600"
                   />
+                </div>
+
+                {/* Feedback & Evaluation Schedule & Availability (Configurable BEFORE Create & Open) */}
+                <div className="pt-3 border-t border-slate-200 space-y-3">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                    <div className="flex items-center gap-2">
+                      <CalendarClock className="w-4 h-4 text-blue-700 shrink-0" />
+                      <span className="text-xs font-bold text-slate-900">
+                        Feedback &amp; Evaluation Timing &amp; Activation
+                      </span>
+                    </div>
+                    <label className="inline-flex items-center gap-2 text-xs font-semibold text-slate-800 cursor-pointer select-none">
+                      <input
+                        type="checkbox"
+                        checked={evFeedbackActive}
+                        onChange={(e) => setEvFeedbackActive(e.target.checked)}
+                        className="w-4 h-4 rounded border-slate-300 text-blue-700 focus:ring-blue-600"
+                      />
+                      <span>
+                        {evFeedbackActive
+                          ? 'Active when opened'
+                          : 'Paused (Deactivated)'}
+                      </span>
+                    </label>
+                  </div>
+
+                  <div className="rounded-xl border border-blue-200 bg-blue-50/40 p-3.5 space-y-3">
+                    <label className="flex items-center gap-2.5 cursor-pointer select-none">
+                      <input
+                        type="checkbox"
+                        checked={evFeedbackScheduleEnabled}
+                        onChange={(e) => {
+                          const checked = e.target.checked;
+                          setEvFeedbackScheduleEnabled(checked);
+                          if (
+                            checked &&
+                            !evFeedbackOpenDate &&
+                            !evFeedbackCloseDate
+                          ) {
+                            applyModalFeedbackPreset('session-window');
+                          }
+                        }}
+                        className="w-4 h-4 rounded border-slate-300 text-blue-700 focus:ring-blue-600"
+                      />
+                      <span className="text-xs font-semibold text-slate-900">
+                        Schedule Feedback &amp; Evaluation Open / Close Window
+                      </span>
+                    </label>
+
+                    {evFeedbackScheduleEnabled ? (
+                      <div className="space-y-3 pt-2 border-t border-blue-200/70">
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          <span className="text-[11px] font-semibold uppercase tracking-wider text-slate-500 mr-1">
+                            Quick Fill:
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              applyModalFeedbackPreset('session-window')
+                            }
+                            className="min-h-[30px] px-2.5 py-1 rounded-lg border border-slate-300 bg-white hover:bg-slate-100 text-[11px] font-semibold text-slate-800"
+                          >
+                            Session Start (+2h)
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => applyModalFeedbackPreset('last-30m')}
+                            className="min-h-[30px] px-2.5 py-1 rounded-lg border border-slate-300 bg-white hover:bg-slate-100 text-[11px] font-semibold text-slate-800"
+                          >
+                            Last 30 Mins (of 2h)
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => applyModalFeedbackPreset('today')}
+                            className="min-h-[30px] px-2.5 py-1 rounded-lg border border-slate-300 bg-white hover:bg-slate-100 text-[11px] font-semibold text-slate-800"
+                          >
+                            Full Day (08:00–17:00)
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => applyModalFeedbackPreset('clear')}
+                            className="min-h-[30px] px-2.5 py-1 rounded-lg border border-slate-200 bg-white hover:bg-rose-50 hover:text-rose-700 text-[11px] font-medium text-slate-600"
+                          >
+                            Clear
+                          </button>
+                        </div>
+
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                          <div className="rounded-lg border border-slate-200 bg-white p-2.5 space-y-1.5">
+                            <span className="block text-[11px] font-bold text-slate-800">
+                              Feedback Opens At
+                            </span>
+                            <div className="grid grid-cols-2 gap-1.5">
+                              <input
+                                type="date"
+                                aria-label="Session feedback opening date"
+                                value={evFeedbackOpenDate}
+                                onChange={(e) =>
+                                  setEvFeedbackOpenDate(e.target.value)
+                                }
+                                className="min-h-[36px] px-2 py-1 text-xs border border-slate-300 rounded-lg bg-slate-50 focus:outline-none focus:ring-2 focus:ring-blue-600"
+                              />
+                              <input
+                                type="time"
+                                aria-label="Session feedback opening time"
+                                value={evFeedbackOpenTime}
+                                onChange={(e) =>
+                                  setEvFeedbackOpenTime(e.target.value)
+                                }
+                                className="min-h-[36px] px-2 py-1 text-xs border border-slate-300 rounded-lg bg-slate-50 focus:outline-none focus:ring-2 focus:ring-blue-600"
+                              />
+                            </div>
+                          </div>
+
+                          <div className="rounded-lg border border-slate-200 bg-white p-2.5 space-y-1.5">
+                            <span className="block text-[11px] font-bold text-slate-800">
+                              Feedback Closes At
+                            </span>
+                            <div className="grid grid-cols-2 gap-1.5">
+                              <input
+                                type="date"
+                                aria-label="Session feedback closing date"
+                                value={evFeedbackCloseDate}
+                                onChange={(e) =>
+                                  setEvFeedbackCloseDate(e.target.value)
+                                }
+                                className="min-h-[36px] px-2 py-1 text-xs border border-slate-300 rounded-lg bg-slate-50 focus:outline-none focus:ring-2 focus:ring-blue-600"
+                              />
+                              <input
+                                type="time"
+                                aria-label="Session feedback closing time"
+                                value={evFeedbackCloseTime}
+                                onChange={(e) =>
+                                  setEvFeedbackCloseTime(e.target.value)
+                                }
+                                className="min-h-[36px] px-2 py-1 text-xs border border-slate-300 rounded-lg bg-slate-50 focus:outline-none focus:ring-2 focus:ring-blue-600"
+                              />
+                            </div>
+                          </div>
+                        </div>
+
+                        <div>
+                          <label
+                            htmlFor="ev-fb-closed-msg"
+                            className="block text-[11px] font-semibold text-slate-700 mb-1"
+                          >
+                            Message When Outside Window or Paused (Optional)
+                          </label>
+                          <input
+                            id="ev-fb-closed-msg"
+                            type="text"
+                            maxLength={300}
+                            value={evFeedbackClosedMessage}
+                            onChange={(e) =>
+                              setEvFeedbackClosedMessage(e.target.value)
+                            }
+                            placeholder="e.g. Evaluation opens during the final 30 minutes of the session."
+                            className="w-full min-h-[36px] px-2.5 py-1.5 text-xs bg-white border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-600"
+                          />
+                        </div>
+                      </div>
+                    ) : (
+                      <p className="text-[11px] text-slate-600">
+                        {evFeedbackActive
+                          ? 'Feedback & Evaluation will be open immediately when the session starts. You can also edit questions or pause feedback anytime while the event is ongoing.'
+                          : 'Feedback & Evaluation will start paused until you click Activate Feedback.'}
+                      </p>
+                    )}
+                  </div>
                 </div>
 
                 {/* Instant Participant Access Notice */}
