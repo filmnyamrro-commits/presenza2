@@ -17,6 +17,7 @@ import {
   Play,
   QrCode,
   RotateCcw,
+  Save,
   SlidersHorizontal,
   Sparkles,
   Users,
@@ -76,6 +77,7 @@ interface LiveAnimatedDashboardProps {
   onToggleVoiceMute?: () => void;
   speakingParticipantName?: string | null;
   onSavePublicAppUrl?: (nextUrl: string) => Promise<void>;
+  onEndAndSaveEvent?: (event: EventRecord) => Promise<boolean>;
 }
 
 const ANIMATION_STYLE_OPTIONS: {
@@ -152,6 +154,7 @@ export default function LiveAnimatedDashboard({
   onToggleVoiceMute,
   speakingParticipantName,
   onSavePublicAppUrl,
+  onEndAndSaveEvent,
 }: LiveAnimatedDashboardProps) {
   const prefersReducedMotion = useReducedMotion();
   const [draftSettings, setDraftSettings] = useState<LiveBoardSettings>(() =>
@@ -179,6 +182,15 @@ export default function LiveAnimatedDashboard({
   const [savingPublicUrl, setSavingPublicUrl] = useState(false);
   const [publicUrlError, setPublicUrlError] = useState<string | null>(null);
   const [editingPublicUrl, setEditingPublicUrl] = useState(false);
+  const [confirmingEndEventId, setConfirmingEndEventId] = useState<string | null>(
+    null
+  );
+  const [endingEvent, setEndingEvent] = useState(false);
+  const [endEventFeedback, setEndEventFeedback] = useState<{
+    title: string;
+    saved: boolean;
+    error?: string;
+  } | null>(null);
 
   // Enlarged QR live check-in photo pop-up queue
   const [zoomPopupQueue, setZoomPopupQueue] = useState<AttendanceRecord[]>([]);
@@ -386,6 +398,34 @@ export default function LiveAnimatedDashboard({
       window.setTimeout(() => setCopiedQrLink(false), 2000);
     } catch {
       // Ignore clipboard permission failure
+    }
+  };
+
+  useEffect(() => {
+    setConfirmingEndEventId(null);
+  }, [qrTargetEvent?.id]);
+
+  useEffect(() => {
+    if (!endEventFeedback?.saved) return;
+    const timer = window.setTimeout(() => setEndEventFeedback(null), 6000);
+    return () => window.clearTimeout(timer);
+  }, [endEventFeedback]);
+
+  const handleConfirmEndAndSave = async (ev: EventRecord) => {
+    if (!onEndAndSaveEvent || endingEvent) return;
+    setEndingEvent(true);
+    setEndEventFeedback(null);
+    const ok = await onEndAndSaveEvent(ev);
+    setEndingEvent(false);
+    setConfirmingEndEventId(null);
+    if (ok) {
+      setEndEventFeedback({ title: ev.title, saved: true });
+    } else {
+      setEndEventFeedback({
+        title: ev.title,
+        saved: false,
+        error: 'Failed to end and save event. Please try again.',
+      });
     }
   };
 
@@ -717,10 +757,20 @@ export default function LiveAnimatedDashboard({
               )}
               <span
                 className={`text-[11px] font-bold uppercase tracking-wider ${
-                  theme.isDark ? 'text-emerald-400' : 'text-emerald-700'
+                  selectedEvent?.status === 'closed'
+                    ? theme.isDark
+                      ? 'text-amber-300'
+                      : 'text-amber-700'
+                    : theme.isDark
+                    ? 'text-emerald-400'
+                    : 'text-emerald-700'
                 }`}
               >
-                {selectedEvent ? 'ONGOING EVENT · LIVE BOARD' : 'LIVE ATTENDANCE BOARD'}
+                {selectedEvent
+                  ? selectedEvent.status === 'closed'
+                    ? 'ENDED & SAVED EVENT'
+                    : 'ONGOING EVENT · LIVE BOARD'
+                  : 'LIVE ATTENDANCE BOARD'}
               </span>
             </div>
 
@@ -1364,6 +1414,96 @@ export default function LiveAnimatedDashboard({
                   </>
                 )}
               </button>
+
+              {qrTargetEvent && onEndAndSaveEvent ? (
+                confirmingEndEventId === qrTargetEvent.id ? (
+                  <div
+                    className={`rounded-xl border p-2.5 space-y-2 ${
+                      theme.isDark
+                        ? 'border-amber-700/70 bg-amber-950/60 text-amber-100'
+                        : 'border-amber-300 bg-amber-50 text-amber-950'
+                    }`}
+                  >
+                    <p className="text-[11px] font-semibold leading-snug">
+                      End check-in &amp; save &ldquo;{qrTargetEvent.title}&rdquo;?
+                    </p>
+                    <div className="flex items-center gap-1.5">
+                      <button
+                        type="button"
+                        disabled={endingEvent}
+                        onClick={() => void handleConfirmEndAndSave(qrTargetEvent)}
+                        className="flex-1 min-h-[32px] px-2.5 py-1 rounded-lg bg-rose-600 hover:bg-rose-700 text-white text-[11px] font-bold inline-flex items-center justify-center gap-1 transition-colors whitespace-nowrap disabled:opacity-60"
+                      >
+                        {endingEvent ? (
+                          <Loader2 className="w-3 h-3 animate-spin" />
+                        ) : (
+                          <Save className="w-3 h-3" />
+                        )}
+                        <span>{endingEvent ? 'Saving...' : 'Confirm & Save'}</span>
+                      </button>
+                      <button
+                        type="button"
+                        disabled={endingEvent}
+                        onClick={() => setConfirmingEndEventId(null)}
+                        className={`min-h-[32px] px-2.5 py-1 rounded-lg border text-[11px] font-semibold transition-colors whitespace-nowrap disabled:opacity-60 ${
+                          theme.isDark
+                            ? 'border-slate-700 bg-slate-800 text-slate-200 hover:bg-slate-700'
+                            : 'border-slate-300 bg-white text-slate-700 hover:bg-slate-100'
+                        }`}
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    disabled={endingEvent}
+                    onClick={() => {
+                      setEndEventFeedback(null);
+                      setConfirmingEndEventId(qrTargetEvent.id);
+                    }}
+                    className={`min-h-[34px] px-3 py-1.5 rounded-xl border text-xs font-semibold inline-flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap disabled:opacity-50 ${
+                      theme.isDark
+                        ? 'border-amber-500/40 bg-amber-500/15 text-amber-200 hover:bg-amber-500/25'
+                        : 'border-amber-300 bg-amber-50 text-amber-900 hover:bg-amber-100'
+                    }`}
+                  >
+                    <Save className="w-3.5 h-3.5" />
+                    <span>End &amp; Save Event</span>
+                  </button>
+                )
+              ) : selectedEvent?.status === 'closed' ? (
+                <div
+                  className={`min-h-[34px] px-3 py-1.5 rounded-xl border text-xs font-semibold inline-flex items-center justify-center gap-1.5 whitespace-nowrap ${
+                    theme.isDark
+                      ? 'border-emerald-700/60 bg-emerald-950/40 text-emerald-300'
+                      : 'border-emerald-200 bg-emerald-50 text-emerald-800'
+                  }`}
+                >
+                  <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+                  <span>Event Ended &amp; Saved</span>
+                </div>
+              ) : null}
+
+              {endEventFeedback && (
+                <div
+                  role="status"
+                  className={`rounded-xl border px-2.5 py-1.5 text-[11px] font-semibold leading-snug ${
+                    endEventFeedback.saved
+                      ? theme.isDark
+                        ? 'border-emerald-700/60 bg-emerald-950/50 text-emerald-200'
+                        : 'border-emerald-200 bg-emerald-50 text-emerald-800'
+                      : theme.isDark
+                      ? 'border-rose-700/60 bg-rose-950/50 text-rose-200'
+                      : 'border-rose-200 bg-rose-50 text-rose-800'
+                  }`}
+                >
+                  {endEventFeedback.saved
+                    ? `Ended & saved "${endEventFeedback.title}". Attendance records remain archived in Past Events.`
+                    : endEventFeedback.error}
+                </div>
+              )}
             </div>
           </aside>
         )}

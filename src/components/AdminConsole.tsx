@@ -1590,6 +1590,19 @@ export default function AdminConsole({
     }
   };
 
+  const handleEndAndSaveEvent = async (ev: EventRecord): Promise<boolean> => {
+    try {
+      await updateDoc(doc(db, 'events', ev.id), {
+        status: 'closed',
+        updatedAt: serverTimestamp(),
+      });
+      return true;
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, `events/${ev.id}`);
+      return false;
+    }
+  };
+
   const handleToggleAttendanceStatus = async (record: AttendanceRecord) => {
     const nextStatus: AttendanceStatus =
       record.status === 'On Time' ? 'Late' : 'On Time';
@@ -2117,6 +2130,7 @@ export default function AdminConsole({
           }}
           speakingParticipantName={speakingParticipantName}
           onSavePublicAppUrl={handleSavePublicAppUrl}
+          onEndAndSaveEvent={handleEndAndSaveEvent}
         />
       )}
 
